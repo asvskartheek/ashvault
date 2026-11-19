@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ashvault · Dungeon Master</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@500;700&family=Barlow+Condensed:wght@400;600&display=swap" rel="stylesheet">
+<style>
+:root { --bg:#0c0b0d; --card:#16141a; --line:#2c2830; --fg:#e9e2d4; --dim:#9a9184; --ember:#ff8a3d; --frost:#8fd0ff; --venom:#8fe05a; --violet:#a98cf5; }
+* { box-sizing:border-box }
+body { margin:0; background:var(--bg); color:var(--fg); font:16px/1.4 "Barlow Condensed", system-ui, sans-serif; }
+main { max-width:1060px; margin:0 auto; padding:40px 20px 80px; }
+h1 { font:700 40px "Cinzel", serif; letter-spacing:.06em; margin:0 0 28px; }
+h2 { font:500 20px "Cinzel", serif; letter-spacing:.08em; color:var(--ember); margin:48px 0 14px; }
+figure { margin:0; background:var(--card); border:1px solid var(--line); border-radius:12px; padding:20px; }
+figcaption { color:var(--dim); margin-top:12px; font-size:15px; }
+svg { width:100%; height:auto; display:block; color:var(--fg); }
+svg text { font-family:"Barlow Condensed", sans-serif; fill:currentColor; }
+.grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:14px; }
+.card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; }
+.card b { display:block; font:600 30px "Barlow Condensed"; }
+.card span { color:var(--dim); }
+.ok { color:var(--venom) } .warn { color:var(--ember) } .todo { color:var(--dim) }
+details { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:12px 16px; margin-top:10px; }
+summary { cursor:pointer; font-weight:600; }
+pre { background:#0a090b; border:1px solid var(--line); border-radius:8px; padding:12px; overflow:auto; font:13px/1.45 ui-monospace, Menlo, monospace; color:#d8cfbf; }
+table { width:100%; border-collapse:collapse; }
+td { padding:8px 6px; border-bottom:1px solid var(--line); }
+td:first-child { width:28px; }
+</style>
+</head>
+<body>
+<main>
+<h1>Ashvault · Dungeon Master</h1>
+
+<h2>The loop</h2>
+<figure>
+<svg viewBox="0 0 1000 300" role="img" aria-label="Player actions become events; the host's Dungeon Master writes world code; it is validated, applied and broadcast to every player.">
+<defs><marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
+<g fill="none" stroke="currentColor" stroke-width="1.5">
+<rect x="20" y="110" width="150" height="80" rx="10"/>
+<rect x="250" y="110" width="170" height="80" rx="10" stroke="#ff8a3d" stroke-width="2.5"/>
+<rect x="500" y="110" width="150" height="80" rx="10"/>
+<rect x="730" y="110" width="150" height="80" rx="10"/>
+<path d="M170 150H246" marker-end="url(#a)"/>
+<path d="M420 150H496" marker-end="url(#a)"/>
+<path d="M650 150H726" marker-end="url(#a)"/>
+<path d="M805 190V250H95V194" marker-end="url(#a)"/>
+<path d="M880 150H960V60H335V106" marker-end="url(#a)" stroke-dasharray="5 5"/>
+</g>
+<text x="95" y="146" text-anchor="middle" font-size="20">Players</text>
+<text x="95" y="170" text-anchor="middle" font-size="14" opacity=".7">1 – 12 + AI</text>
+<text x="335" y="146" text-anchor="middle" font-size="20" fill="#ff8a3d">Dungeon Master</text>
+<text x="335" y="170" text-anchor="middle" font-size="14" opacity=".7">local LLM · host</text>
+<text x="575" y="146" text-anchor="middle" font-size="20">validate()</text>
+<text x="575" y="170" text-anchor="middle" font-size="14" opacity=".7">schema gate</text>
+<text x="805" y="146" text-anchor="middle" font-size="20">World API</text>
+<text x="805" y="170" text-anchor="middle" font-size="14" opacity=".7">every screen</text>
+<text x="208" y="140" text-anchor="middle" font-size="13">events</text>
+<text x="458" y="140" text-anchor="middle" font-size="13">world code</text>
+<text x="688" y="140" text-anchor="middle" font-size="13">commands</text>
+<text x="450" y="270" text-anchor="middle" font-size="13">enemies · lights · mood · SFX · music · quests · narration</text>
+<text x="640" y="50" text-anchor="middle" font-size="13">quest done · lull · death → next reaction</text>
+</svg>
+<figcaption>The DM only writes JSON commands that use parts the game already has. It never generates assets.</figcaption>
+</figure>
+
+<h2>Which brain runs</h2>
+<figure>
+<svg viewBox="0 0 1000 170" role="img" aria-label="Backend cascade: Chrome built-in Gemini Nano first, then Liquid LFM2.5-350M on WebGPU, then the scripted DM.">
+<defs><marker id="b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
+<g fill="none" stroke-width="2">
+<rect x="20" y="40" width="260" height="90" rx="10" stroke="#8fd0ff"/>
+<rect x="370" y="40" width="260" height="90" rx="10" stroke="#a98cf5"/>
+<rect x="720" y="40" width="260" height="90" rx="10" stroke="#8fe05a"/>
+<path d="M280 85H366" stroke="currentColor" marker-end="url(#b)"/>
+<path d="M630 85H716" stroke="currentColor" marker-end="url(#b)"/>
+</g>
+<text x="150" y="78" text-anchor="middle" font-size="20" fill="#8fd0ff">Chrome Prompt API</text>
+<text x="150" y="102" text-anchor="middle" font-size="14" opacity=".75">Gemini Nano · JSON-schema output</text>
+<text x="500" y="78" text-anchor="middle" font-size="20" fill="#a98cf5">Liquid LFM2.5-350M</text>
+<text x="500" y="102" text-anchor="middle" font-size="14" opacity=".75">WebGPU worker · 255 MB</text>
+<text x="850" y="78" text-anchor="middle" font-size="20" fill="#8fe05a">Scripted DM</text>
+<text x="850" y="102" text-anchor="middle" font-size="14" opacity=".75">always works · Patch test</text>
+<text x="323" y="72" text-anchor="middle" font-size="12">not ready</text>
+<text x="673" y="72" text-anchor="middle" font-size="12">timeout / 0 valid</text>
+</svg>
+<figcaption>Everything runs on the player's own machine. Nothing is sent to a server.</figcaption>
+</figure>
+
+<h2>One floor</h2>
+<figure>
+<svg viewBox="0 0 1000 150" role="img" aria-label="Floor timeline: plan during loading, build, populate, then react repeatedly during play.">
+<g fill="none" stroke="currentColor" stroke-width="1.5">
+<line x1="40" y1="75" x2="960" y2="75" opacity=".4"/>
+</g>
+<g font-size="14">
+<circle cx="90" cy="75" r="10" fill="#ff8a3d"/><text x="90" y="45" text-anchor="middle" font-size="18">plan</text><text x="90" y="110" text-anchor="middle" opacity=".75">palette · name · size</text>
+<circle cx="300" cy="75" r="10" fill="currentColor" opacity=".5"/><text x="300" y="45" text-anchor="middle" font-size="18">build</text><text x="300" y="110" text-anchor="middle" opacity=".75">generator · seed</text>
+<circle cx="510" cy="75" r="10" fill="#ff8a3d"/><text x="510" y="45" text-anchor="middle" font-size="18">populate</text><text x="510" y="110" text-anchor="middle" opacity=".75">roles · guards · quests · lights</text>
+<circle cx="720" cy="75" r="10" fill="#ff8a3d"/><circle cx="790" cy="75" r="10" fill="#ff8a3d"/><circle cx="860" cy="75" r="10" fill="#ff8a3d"/>
+<text x="790" y="45" text-anchor="middle" font-size="18">react ×N</text><text x="790" y="110" text-anchor="middle" opacity=".75">≤ 4 cmds · ≥ 4 s apart</text>
+</g>
+</svg>
+<figcaption>Orange dots are LLM calls, each with a hard timeout. The first floor uses the scripted DM while the model loads.</figcaption>
+</figure>
+
+<details><summary>World code ops</summary>
+<table>
+<tr><td class="ok">●</td><td><b>plan</b> — floor, say, music, mood</td></tr>
+<tr><td class="ok">●</td><td><b>populate</b> — role, guard, quest, light, seal, say, music, mood</td></tr>
+<tr><td class="ok">●</td><td><b>react</b> — spawn, light, mood, sfx, music, bless, curse, say, quest</td></tr>
+</table>
+<pre>[{"op":"spawn","enemy":"wisp","n":3,"near":"party"},
+ {"op":"light","room":4,"color":"violet","power":1.6},
+ {"op":"say","text":"The dead remember your blade.","voice":"whisper"}]</pre>
+</details>
+
+<h2>1 – 12 players</h2>
+<figure>
+<svg viewBox="0 0 1000 300" role="img" aria-label="Host-authoritative star: clients send state, hits and events to the host; host sends one bundled tick, DM programs and damage.">
+<defs><marker id="c" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker></defs>
+<g fill="none" stroke="currentColor" stroke-width="1.5">
+<rect x="400" y="100" width="200" height="100" rx="12" stroke="#ff8a3d" stroke-width="2.5"/>
+<rect x="60" y="30" width="150" height="60" rx="10"/><rect x="60" y="210" width="150" height="60" rx="10"/>
+<rect x="790" y="30" width="150" height="60" rx="10" stroke-dasharray="5 4"/><rect x="790" y="210" width="150" height="60" rx="10" stroke-dasharray="5 4"/>
+<path d="M210 60L396 120" marker-end="url(#c)"/><path d="M396 180L214 238" marker-end="url(#c)"/>
+<path d="M600 130L786 70" marker-end="url(#c)" opacity=".5"/><path d="M600 170L786 236" marker-end="url(#c)" opacity=".5"/>
+</g>
+<text x="500" y="140" text-anchor="middle" font-size="20" fill="#ff8a3d">Host</text>
+<text x="500" y="164" text-anchor="middle" font-size="13" opacity=".75">DM · enemies · bots · quests</text>
+<text x="135" y="66" text-anchor="middle" font-size="16">Player</text><text x="135" y="246" text-anchor="middle" font-size="16">Player</text>
+<text x="865" y="66" text-anchor="middle" font-size="16">AI companion</text><text x="865" y="246" text-anchor="middle" font-size="16">AI companion</text>
+<text x="300" y="78" text-anchor="middle" font-size="13">p 12 Hz · hit · ev</text>
+<text x="300" y="232" text-anchor="middle" font-size="13">h 10 Hz · prog · dmg</text>
+<text x="700" y="290" text-anchor="middle" font-size="13">fills the party a quest asks for</text>
+</svg>
+<figcaption>Patch rooms carry the messages; there is no game server. If the host leaves, the longest-present player takes over, DM included.</figcaption>
+</figure>
+
+<h2>Measured</h2>
+<div class="grid">
+<div class="card"><b>1.1 s</b><span>LFM reaction · WebGPU</span></div>
+<div class="card"><b>21 s</b><span>LFM warm-up · first load</span></div>
+<div class="card"><b>1 ms</b><span>worst main-thread gap while generating</span></div>
+<div class="card"><b>2.5 KB</b><span>host tick at 12 players + 30 enemies + 11 bots · cap 16 KB</span></div>
+<div class="card"><b class="warn">0 / 4</b><span>valid cmds from free LFM output → grammar-constrained decoding in progress</span></div>
+</div>
+
+<h2>Status</h2>
+<table>
+<tr><td class="ok">✓</td><td>Scripted DM, quests, narration, palettes, moods, music layers</td></tr>
+<tr><td class="ok">✓</td><td>AI companions · multi-target enemies</td></tr>
+<tr><td class="ok">✓</td><td>Local multiplayer · host migration · late join</td></tr>
+<tr><td class="ok">✓</td><td>Patch test checks incl. dm-genesis, dm-react</td></tr>
+<tr><td class="warn">◐</td><td>LFM output quality (constrained decoding)</td></tr>
+<tr><td class="todo">○</td><td>Real Patch rooms · Chrome Prompt API on a ready machine</td></tr>
+<tr><td class="todo">○</td><td>Release size: 255 MB model + 27 MB wasm vs Patch limit</td></tr>
+</table>
+</main>
+</body>
+</html>
