@@ -1,0 +1,5 @@
+{
+  "components": [{ "id": "game", "file": "dist/" }],
+  "launch": { "kind": "browser", "component": "game", "entry": "index.html" },
+  "test": { "checks": ["level-loads", "enemy-rises", "sword-hits", "fireball-hits", "enemy-killed"] }
+}
