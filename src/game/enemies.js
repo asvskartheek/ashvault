@@ -6,6 +6,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import * as SkeletonUtils from 'three/examples/jsm/utils/SkeletonUtils.js';
 import { CELL_M } from '../dungeon/view.js';
 import { floorAt } from '../dungeon/floors.js';
+import { bfsField, cellOf, pickTarget, stepDown } from '../party/bots.js';
 
 const FLOOR = 1;
 
@@ -17,6 +18,9 @@ export const TYPES = {
 };
 
 const ANIM = { idle: 'Idle', walk: 'Run', attack: 'Attack', attack2: 'Kick', hit: 'Hit', slam: 'GroundSlam', taunt: 'GroundSlam' };
+// Wire anim indices (snapshot): idle walk attack kick hit slam taunt dead cast rise.
+const WIRE = ['idle', 'walk', 'attack', 'attack2', 'hit', 'slam', 'taunt', 'dead', 'cast', 'rise'];
+const TYPE_KEYS = Object.keys(TYPES);
 const ONCE = ['attack', 'attack2', 'hit', 'slam', 'taunt'];
 
 export async function loadEnemyAssets(onProgress) {
@@ -64,36 +68,35 @@ export function createEnemies({ scene, assets, dungeon: d, fx, audio, env }) {
 	const passAt = (x, z) => passable(Math.floor(x + W / 2), Math.floor(z + H / 2));
 	const floorY = (x, z) => floorAt(d, x + W / 2, z + H / 2) * CELL_M;
 
-	// Distance field from the player over the floor, refreshed a few times a second.
+	// Distance field from every alive target (multi-source), refreshed a few times a second.
 	const dist = new Int16Array(W * H);
 	const queue = new Int32Array(W * H);
+	const src = new Int32Array(32);
+	const tg = [];
+	const me = { id: 'me', x: 0, z: 0, alive: true };
+	let tn = 0;
+	let puppet = false;
+	let nextId = 1;
+	let stamp = 0;
 	let fieldT = 0;
-	function buildField(px, pz) {
-		dist.fill(-1);
-		const sx = Math.floor(px + W / 2);
-		const sy = Math.floor(pz + H / 2);
-		if (sx < 0 || sy < 0 || sx >= W || sy >= H) return;
-		let qh = 0;
-		let qt = 0;
-		dist[sy * W + sx] = 0;
-		queue[qt++] = sy * W + sx;
-		while (qh < qt) {
-			const c = queue[qh++];
-			const cx = c % W;
-			const cy = (c / W) | 0;
-			const dv = dist[c];
-			if (dv > 60) continue;
-			for (const [ox, oy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-				const nx = cx + ox;
-				const ny = cy + oy;
-				if (nx < 0 || ny < 0 || nx >= W || ny >= H) continue;
-				const n = ny * W + nx;
-				if (dist[n] !== -1 || grid[n] !== FLOOR) continue;
-				dist[n] = dv + 1;
-				queue[qt++] = n;
-			}
-		}
+	const snapRows = [];
+	function buildField() {
+		let n = 0;
+		for (let i = 0; i < tn && n < 32; i++) if (tg[i].alive) src[n++] = cellOf(W, H, tg[i].x, tg[i].z);
+		bfsField(grid, W, H, src, n, dist, queue, 60);
 	}
+	function setTargets(list) {
+		tn = Math.min(list.length, 32);
+		for (let i = 0; i < tn; i++) {
+			const t = (tg[i] ||= { id: '', x: 0, z: 0, alive: true });
+			t.id = list[i].id;
+			t.x = list[i].x;
+			t.z = list[i].z;
+			t.alive = list[i].alive !== false;
+		}
+		fieldT = 0;
+	}
+	const wp = { x: 0, z: 0 };
 	function lineClear(x0, z0, x1, z1) {
 		const steps = Math.ceil(Math.hypot(x1 - x0, z1 - z0) * 3);
 		for (let i = 1; i < steps; i++) {
@@ -173,6 +176,17 @@ export function createEnemies({ scene, assets, dungeon: d, fx, audio, env }) {
 			dead: false,
 			gone: false,
 			struck: false,
+			id: nextId++,
+			ti: TYPE_KEYS.indexOf(type),
+			tgt: null,
+			kick: false,
+			pa: -1,
+			wa: 0,
+			pv: 0,
+			seen: 0,
+			px: x,
+			pz: z,
+			pyaw: 0,
 		};
 		play(e, 'idle', 0);
 		if (T.boss) {
@@ -189,6 +203,41 @@ export function createEnemies({ scene, assets, dungeon: d, fx, audio, env }) {
 		place(e);
 		list.push(e);
 		return e;
+	}
+
+	function visuals(e, dt, near) {
+		if (e.flash > 0) {
+			e.flash -= dt;
+			const f = Math.max(0, e.flash) * 1.6;
+			for (const m of e.mats) m.emissive.setRGB(m.userData.amb[0] + f * (e.flashFire ? 1.4 : 1), m.userData.amb[1] + f * (e.flashFire ? 0.5 : 0.9), m.userData.amb[2] + f * (e.flashFire ? 0.15 : 0.8));
+			if (e.wisp) e.wisp.haloMat.uniforms.uK.value = 1 + f;
+		}
+		if (near) e.mixer.update(dt);
+		if (e.wisp && !e.dead) {
+			const p = e.root.position;
+			fx.wispTrail(p.x, p.y + 1.35, p.z, e.state === 'cast' ? 2 : 1);
+			e.wisp.core.scale.setScalar(1 + Math.sin(e.phase * 13) * 0.08 + (e.state === 'cast' ? (0.7 - Math.max(0, e.t)) * 1.4 : 0));
+		}
+	}
+
+	// Falling and sinking after death; true once the body is gone from the list.
+	function tickDead(e, i, dt) {
+		if (e.wisp) {
+			scene.remove(e.root);
+			e.gone = true;
+			list.splice(i, 1);
+			return true;
+		}
+		e.fall = Math.min(1.45, e.fall + dt * (1.2 + e.fall * 3));
+		e.root.rotation.x = -e.fall;
+		if (e.t < 1) e.root.position.y -= dt * (e.T.boss ? 1.2 : 0.6);
+		if (e.t <= 0) {
+			scene.remove(e.root);
+			e.gone = true;
+			list.splice(i, 1);
+			return true;
+		}
+		return false;
 	}
 
 	function play(e, name, fade = 0.15) {
@@ -280,7 +329,176 @@ export function createEnemies({ scene, assets, dungeon: d, fx, audio, env }) {
 		fx.soul(cx, y, cz, e.T.boss ? [2, 1, 0.4] : [0.5, 1.6, 1.4]);
 	}
 
+	// Wire anim index of what an enemy is doing.
+	function animOf(e) {
+		switch (e.state) {
+			case 'rise': return 9;
+			case 'taunt': return 6;
+			case 'hit': return 4;
+			case 'attack': return e.kick ? 3 : 2;
+			case 'slam': return 5;
+			case 'cast': return 8;
+			case 'dead': return 7;
+			default: return Math.hypot(e.vx, e.vz) > 0.3 ? 1 : 0;
+		}
+	}
+
+	function byId(id) {
+		for (const e of list) if (e.id === id) return e;
+		return null;
+	}
+
+	// Puppet side: take the host's anim for this enemy, starting the clip only when it changes.
+	function setAnim(e, a) {
+		if (e.pa !== a) {
+			const was = e.pa;
+			e.pa = a;
+			if (was === 9) e.sink = 0;
+			switch (a) {
+				case 9:
+					e.state = 'rise';
+					e.t = e.wisp ? 0.6 : 1.1;
+					e.sink = 1;
+					fx.riseDust(e.x * CELL_M, floorY(e.x, e.z), e.z * CELL_M);
+					break;
+				case 2:
+				case 3: {
+					e.state = 'attack';
+					const dur = play(e, a === 3 ? 'attack2' : 'attack', 0.08);
+					const ts = e.T.boss ? 1.0 : e.type === 'hollow' ? 1.35 : 1.15;
+					if (e.current) e.current.timeScale = ts;
+					e.t = dur / ts;
+					break;
+				}
+				case 4:
+					e.state = 'hit';
+					play(e, 'hit', 0.05);
+					if (e.current) e.current.timeScale = 1.6;
+					break;
+				case 5:
+				case 6:
+					e.state = a === 5 ? 'slam' : 'taunt';
+					play(e, 'slam', 0.1);
+					break;
+				case 8:
+					e.state = 'cast';
+					e.t = 0.7;
+					break;
+				default:
+					e.state = 'chase';
+					play(e, a === 1 ? 'walk' : 'idle', 0.2);
+			}
+		}
+		if (a === 1 && e.actions.walk) e.actions.walk.timeScale = e.T.boss ? 0.95 : Math.max(0.5, (e.pv / 3) * (e.T.walkRate ?? 1));
+	}
+
+	function puppetUpdate(dt) {
+		const k = Math.min(1, dt * 12);
+		for (let i = list.length - 1; i >= 0; i--) {
+			const e = list[i];
+			e.t -= dt;
+			e.phase += dt;
+			if (e.dead) {
+				visuals(e, dt, true);
+				if (tickDead(e, i, dt)) continue;
+				place(e);
+				continue;
+			}
+			const ox = e.x;
+			const oz = e.z;
+			e.x += (e.px - e.x) * k;
+			e.z += (e.pz - e.z) * k;
+			let dy = e.pyaw - e.yaw;
+			dy = Math.atan2(Math.sin(dy), Math.cos(dy));
+			e.yaw += dy * k;
+			e.pv = dt > 0 ? Math.hypot(e.x - ox, e.z - oz) / dt : 0;
+			if (e.state === 'rise') e.sink = Math.max(0, e.t / (e.wisp ? 0.6 : 1.1)) ** 2;
+			setAnim(e, e.wa);
+			let near = true;
+			if (tn > 0) near = Math.hypot(tg[0].x - e.x, tg[0].z - e.z) < 34;
+			visuals(e, dt, near);
+			place(e);
+		}
+	}
+
+	// Host side: compact rows [id, typeIndex, x, z, yaw, hp, anim], reused between calls (encode before the next call).
+	function snapshot() {
+		let n = 0;
+		for (const e of list) {
+			const r = (snapRows[n] ||= [0, 0, 0, 0, 0, 0, 0]);
+			r[0] = e.id;
+			r[1] = e.ti;
+			r[2] = Math.round(e.x * 100) / 100;
+			r[3] = Math.round(e.z * 100) / 100;
+			r[4] = Math.round(e.yaw * 100) / 100;
+			r[5] = Math.max(0, e.hp);
+			r[6] = animOf(e);
+			n++;
+		}
+		snapRows.length = n;
+		return snapRows;
+	}
+
+	// Client side: become a puppet of the host's list. No AI, no damage.
+	function applySnapshot(rows) {
+		puppet = true;
+		stamp++;
+		for (let i = 0; i < rows.length; i++) {
+			const [id, ti, x, z, yaw, hp, anim] = rows[i];
+			let e = byId(id);
+			if (!e) {
+				if (anim === 7 || !TYPE_KEYS[ti]) continue;
+				e = spawn(TYPE_KEYS[ti], x, z, { rise: false });
+				e.id = id;
+				nextId = Math.max(nextId, id + 1);
+				e.state = 'chase';
+				e.t = 0;
+				e.px = x;
+				e.pz = z;
+				e.yaw = e.pyaw = yaw;
+				e.pa = -1;
+				e.wa = anim;
+				e.hp = hp;
+			}
+			e.seen = stamp;
+			e.px = x;
+			e.pz = z;
+			e.pyaw = yaw;
+			if (hp < e.hp && !e.dead) {
+				e.flash = 0.18;
+				e.flashFire = false;
+			}
+			e.hp = hp;
+			if (e.dead) continue;
+			if (anim === 7) kill(e);
+			else e.wa = anim;
+		}
+		// Gone from the host's list and not dying here: drop it.
+		for (let i = list.length - 1; i >= 0; i--) {
+			const e = list[i];
+			if (e.dead || e.seen === stamp) continue;
+			scene.remove(e.root);
+			e.gone = true;
+			list.splice(i, 1);
+		}
+	}
+
+	// Host applying a client's hit: same path and result shape as hurt().
+	function damageById(id, dmg, opts) {
+		const e = byId(id);
+		return e ? hurt(e, dmg, opts) : null;
+	}
+
 	return {
+		snapshot,
+		applySnapshot,
+		damageById,
+		get puppet() {
+			return puppet;
+		},
+		set puppet(v) {
+			puppet = !!v;
+		},
 		list,
 		spawn,
 		hurt,
@@ -292,16 +510,30 @@ export function createEnemies({ scene, assets, dungeon: d, fx, audio, env }) {
 			for (const e of list) if (!e.dead) n++;
 			return n;
 		},
-		update(dt, player, hooks) {
+		setTargets,
+		update(dt, a, b) {
+			// update(dt, hooks) after setTargets, or the old update(dt, player, hooks): one target, 'me'.
+			let hooks = a;
+			if (b !== undefined) {
+				hooks = b;
+				me.x = a.x;
+				me.z = a.z;
+				tg[0] = me;
+				tn = 1;
+			}
+			if (puppet) return puppetUpdate(dt);
 			fieldT -= dt;
 			if (fieldT <= 0) {
 				fieldT = 0.2;
-				buildField(player.x, player.z);
+				buildField();
 			}
 			for (let i = list.length - 1; i >= 0; i--) {
 				const e = list[i];
-				const px = player.x - e.x;
-				const pz = player.z - e.z;
+				const tgt = (e.tgt = pickTarget(tg, tn, e.x, e.z, e.tgt));
+				const TX = tgt ? tgt.x : e.x;
+				const TZ = tgt ? tgt.z : e.z;
+				const px = TX - e.x;
+				const pz = TZ - e.z;
 				const pd = Math.hypot(px, pz);
 				e.t -= dt;
 				e.cd -= dt;
@@ -314,23 +546,12 @@ export function createEnemies({ scene, assets, dungeon: d, fx, audio, env }) {
 					e.kz *= k;
 					if (Math.abs(e.kx) + Math.abs(e.kz) < 0.01) e.kx = e.kz = 0;
 				}
-				if (e.flash > 0) {
-					e.flash -= dt;
-					const f = Math.max(0, e.flash) * 1.6;
-					for (const m of e.mats) m.emissive.setRGB(m.userData.amb[0] + f * (e.flashFire ? 1.4 : 1), m.userData.amb[1] + f * (e.flashFire ? 0.5 : 0.9), m.userData.amb[2] + f * (e.flashFire ? 0.15 : 0.8));
-					if (e.wisp) e.wisp.haloMat.uniforms.uK.value = 1 + f;
-				}
-				if (pd < 34) e.mixer.update(dt);
-				if (e.wisp && !e.dead) {
-					const p = e.root.position;
-					fx.wispTrail(p.x, p.y + 1.35, p.z, e.state === 'cast' ? 2 : 1);
-					e.wisp.core.scale.setScalar(1 + Math.sin(e.phase * 13) * 0.08 + (e.state === 'cast' ? (0.7 - Math.max(0, e.t)) * 1.4 : 0));
-				}
+				visuals(e, dt, pd < 34);
 				switch (e.state) {
 					case 'rise':
 						e.sink = Math.max(0, e.t / (e.wisp ? 0.6 : 1.1)) ** 2;
 						if (!e.wisp && Math.random() < 0.08) fx.riseDust(e.x * CELL_M, floorY(e.x, e.z), e.z * CELL_M);
-						turnTo(e, player.x, player.z, dt, 6);
+						turnTo(e, TX, TZ, dt, 6);
 						if (e.t <= 0) {
 							e.sink = 0;
 							e.state = 'chase';
@@ -338,7 +559,7 @@ export function createEnemies({ scene, assets, dungeon: d, fx, audio, env }) {
 						}
 						break;
 					case 'taunt':
-						turnTo(e, player.x, player.z, dt, 4);
+						turnTo(e, TX, TZ, dt, 4);
 						if (e.t <= 0) {
 							e.state = 'chase';
 							play(e, 'walk', 0.3);
@@ -351,14 +572,15 @@ export function createEnemies({ scene, assets, dungeon: d, fx, audio, env }) {
 						}
 						break;
 					case 'chase': {
-						if (pd > 40) break;
+						if (!tgt || pd > 40) break;
 						const T = e.T;
-						const sees = pd < 11 && lineClear(e.x, e.z, player.x, player.z);
+						const sees = pd < 11 && lineClear(e.x, e.z, TX, TZ);
 						if (T.ranged && sees && pd < 8.5 && e.cd <= 0) {
 							e.state = 'cast';
 							e.t = 0.7;
 							e.fireAt = 0.15;
 							e.struck = false;
+							e.tid = tgt.id;
 							hooks.charge?.(e);
 							break;
 						}
@@ -376,6 +598,7 @@ export function createEnemies({ scene, assets, dungeon: d, fx, audio, env }) {
 						if (!T.ranged && pd < T.reach && e.cd <= 0) {
 							e.state = 'attack';
 							const kick = !T.boss && pd < T.reach * 0.7 && Math.random() < 0.3;
+							e.kick = kick;
 							const dur = play(e, kick ? 'attack2' : 'attack', 0.08);
 							const ts = T.boss ? 1.0 : e.type === 'hollow' ? 1.35 : 1.15;
 							e.current.timeScale = ts;
@@ -388,26 +611,17 @@ export function createEnemies({ scene, assets, dungeon: d, fx, audio, env }) {
 						let tx;
 						let tz;
 						if (sees && (!T.ranged || pd > 5)) {
-							tx = player.x;
-							tz = player.z;
+							tx = TX;
+							tz = TZ;
 						} else if (T.ranged && sees && pd < 4) {
 							tx = e.x - px;
 							tz = e.z - pz;
 						} else {
-							const cx = Math.floor(e.x + W / 2);
-							const cy = Math.floor(e.z + H / 2);
-							let best = dist[cy * W + cx];
-							tx = player.x;
-							tz = player.z;
-							if (best < 0) best = 9999;
-							for (const [ox, oy] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]]) {
-								const n = (cy + oy) * W + cx + ox;
-								const dv = dist[n];
-								if (dv < 0 || dv >= best) continue;
-								if (ox && oy && (grid[cy * W + cx + ox] !== FLOOR || grid[(cy + oy) * W + cx] !== FLOOR)) continue;
-								best = dv;
-								tx = cx + ox + 0.5 - W / 2;
-								tz = cy + oy + 0.5 - H / 2;
+							tx = TX;
+							tz = TZ;
+							if (stepDown(grid, W, H, dist, e.x, e.z, wp)) {
+								tx = wp.x;
+								tz = wp.z;
 							}
 						}
 						let mx = tx - e.x;
@@ -438,7 +652,7 @@ export function createEnemies({ scene, assets, dungeon: d, fx, audio, env }) {
 						e.vx += (mx * sp - e.vx) * Math.min(1, dt * 8);
 						e.vz += (mz * sp - e.vz) * Math.min(1, dt * 8);
 						move(e, e.vx * dt, e.vz * dt);
-						turnTo(e, sees ? player.x : e.x + e.vx, sees ? player.z : e.z + e.vz, dt);
+						turnTo(e, sees ? TX : e.x + e.vx, sees ? TZ : e.z + e.vz, dt);
 						if (e.actions.walk) {
 							if (e.current !== e.actions.walk) play(e, 'walk', 0.2);
 							e.actions.walk.timeScale = T.boss ? 0.95 : Math.max(0.5, (Math.hypot(e.vx, e.vz) / 3) * (T.walkRate ?? 1));
@@ -446,12 +660,14 @@ export function createEnemies({ scene, assets, dungeon: d, fx, audio, env }) {
 						break;
 					}
 					case 'attack':
-						turnTo(e, player.x, player.z, dt, e.t > e.hitAt ? 8 : 1);
+						turnTo(e, TX, TZ, dt, e.t > e.hitAt ? 8 : 1);
 						if (!e.struck && e.t <= e.hitAt) {
 							e.struck = true;
 							const fwd = Math.cos(Math.atan2(px, pz) - e.yaw);
-							if (pd < e.T.reach + 0.45 && fwd > 0.3) hooks.hitPlayer(e, e.dmg);
-							else hooks.whiff?.(e);
+							if (tgt && pd < e.T.reach + 0.45 && fwd > 0.3) {
+								if (tgt.id === 'me') hooks.hitPlayer(e, e.dmg);
+								else hooks.hitActor?.(e, tgt.id, e.dmg, 'melee');
+							} else hooks.whiff?.(e);
 						}
 						if (e.t <= 0) {
 							e.state = 'chase';
@@ -463,6 +679,10 @@ export function createEnemies({ scene, assets, dungeon: d, fx, audio, env }) {
 						if (!e.struck && e.t <= e.hitAt) {
 							e.struck = true;
 							hooks.slam(e, 3.4);
+							// The hook hits 'me'; anyone else in the ring is ours to hit.
+							const sx = e.x + Math.sin(e.yaw) * 1.2;
+							const sz = e.z + Math.cos(e.yaw) * 1.2;
+							for (let k = 0; k < tn; k++) if (tg[k].alive && tg[k].id !== 'me' && Math.hypot(tg[k].x - sx, tg[k].z - sz) < 3.4) hooks.hitActor?.(e, tg[k].id, Math.round(e.dmg * 1.3), 'slam');
 						}
 						if (e.t <= 0) {
 							e.state = 'chase';
@@ -471,10 +691,10 @@ export function createEnemies({ scene, assets, dungeon: d, fx, audio, env }) {
 						}
 						break;
 					case 'cast':
-						turnTo(e, player.x, player.z, dt, 8);
+						turnTo(e, TX, TZ, dt, 8);
 						if (!e.struck && e.t <= e.fireAt) {
 							e.struck = true;
-							hooks.bolt(e);
+							hooks.bolt(e, e.tgt);
 						}
 						if (e.t <= 0) {
 							e.state = 'chase';
@@ -482,20 +702,7 @@ export function createEnemies({ scene, assets, dungeon: d, fx, audio, env }) {
 						}
 						break;
 					case 'dead':
-						if (e.wisp) {
-							scene.remove(e.root);
-							e.gone = true;
-							list.splice(i, 1);
-							continue;
-						}
-						e.fall = Math.min(1.45, e.fall + dt * (1.2 + e.fall * 3));
-						e.root.rotation.x = -e.fall;
-						if (e.t < 1) e.root.position.y -= dt * (e.T.boss ? 1.2 : 0.6);
-						if (e.t <= 0) {
-							scene.remove(e.root);
-							e.gone = true;
-							list.splice(i, 1);
-						}
+						tickDead(e, i, dt);
 						continue;
 				}
 				place(e);
