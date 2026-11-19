@@ -4,7 +4,7 @@
 // the stone, flames, rising walls and the dolly move.
 import * as THREE from 'three';
 import { CEIL_TOP } from './level.js';
-import { THEMES } from './themes.js';
+import { lookTheme } from './themes.js';
 
 const LIGHT_K = 4 * Math.PI;
 const EYE = 1.07;
@@ -1068,6 +1068,8 @@ export function createView(canvas, options = {}) {
 	let topFogCol = new THREE.Color();
 	const baseHemi = { sky: new THREE.Color(), ground: new THREE.Color(), i: 0, dir: 0 };
 	let curTheme = null;
+	// The Dungeon Master's mood: multipliers laid over exposure and fog, a grade tint, and a fog colour pulled by `fogMix`. All neutral by default.
+	const look = { exposure: 1, fog: 1, fogColor: new THREE.Color(0, 0, 0), fogMix: 0 };
 
 	// Post: scene into a multisampled target, bright-pass, blur, then tilt-shift, grade, vignette, grain and gamma. Dungeon Forge's,
 	// with tilt-shift fading out as you come down to eye height.
@@ -1110,7 +1112,7 @@ export function createView(canvas, options = {}) {
 			depthWrite: false,
 		});
 		const fin = new THREE.ShaderMaterial({
-			uniforms: { tAO: { value: blank }, uAO: { value: 0 }, tS: { value: null }, tB: { value: null }, tD: { value: blank }, uDistort: { value: 0 }, uFlashCol: { value: new THREE.Color(1, 1, 1) }, uFlash: { value: 0 }, uRes: { value: new THREE.Vector2(1, 1) }, uTime: U.uTime, uBloom: { value: 0.55 }, uTilt: { value: 1 }, uExposure: { value: 1 } },
+			uniforms: { tAO: { value: blank }, uAO: { value: 0 }, tS: { value: null }, tB: { value: null }, tD: { value: blank }, uDistort: { value: 0 }, uFlashCol: { value: new THREE.Color(1, 1, 1) }, uFlash: { value: 0 }, uRes: { value: new THREE.Vector2(1, 1) }, uTime: U.uTime, uBloom: { value: 0.55 }, uTilt: { value: 1 }, uExposure: { value: 1 }, uGrade: { value: new THREE.Color(1, 1, 1) } },
 			vertexShader: V,
 			fragmentShader: `varying vec2 vUv; uniform sampler2D tAO; uniform float uAO;
 				uniform sampler2D tS, tB, tD; uniform vec2 uRes;
@@ -1121,7 +1123,7 @@ export function createView(canvas, options = {}) {
 					for (int y = -1; y <= 1; y++) for (int x = -1; x <= 1; x++) s += texture2D(tAO, uv + vec2(float(x), float(y)) * px).r;
 					return s / 9.0;
 				}
-				 uniform float uTime, uBloom, uTilt, uExposure, uDistort, uFlash; uniform vec3 uFlashCol;
+				 uniform float uTime, uBloom, uTilt, uExposure, uDistort, uFlash; uniform vec3 uFlashCol, uGrade;
 				void main(){
 					vec2 px = 1.0 / uRes;
 					// Refraction, for a game that draws some into tD and sets uDistort.
@@ -1159,7 +1161,7 @@ export function createView(canvas, options = {}) {
 					b += texture2D(tS, vUv + vec2(-px.x*r, -px.y*r*0.6)).rgb * 0.15;
 					col = mix(col, b, min(1.0, band));
 					col += texture2D(tB, vUv).rgb * uBloom;
-					col *= uExposure;
+					col *= uExposure * uGrade;
 					float lum = dot(col, vec3(0.299, 0.587, 0.114));
 					// Cold in the shade, teal-grey through the middle, neutral where the light is strong: the references' palette.
 					col = mix(col, col * vec3(0.72, 0.92, 1.08), (1.0 - smoothstep(0.02, 0.45, lum)) * 0.85);
@@ -1328,7 +1330,7 @@ export function createView(canvas, options = {}) {
 	}
 
 	function applyTheme(key) {
-		const TH = THEMES[key];
+		const TH = lookTheme(key);
 		curTheme = key;
 		topFogCol.set(TH.fog);
 		walkFog.set(TH.walkFog);
@@ -1359,7 +1361,7 @@ export function createView(canvas, options = {}) {
 	let baseGlow = 1;
 
 	function setLevel(d, level, { reveal = false } = {}) {
-		applyTheme(d.params.theme);
+		applyTheme(d.params.palette ?? 'verdant');
 		for (const [name, s] of Object.entries(level.sets)) {
 			const m = meshes[name];
 			m.dispose();
@@ -1415,7 +1417,7 @@ export function createView(canvas, options = {}) {
 			rune.scale.setScalar(level.rune.s);
 		}
 		{
-			const TH = THEMES[d.params.theme];
+			const TH = lookTheme(d.params.palette);
 			const wx = (x) => x - d.W / 2 + 0.5;
 			const wz = (y) => y - d.H / 2 + 0.5;
 			const spots = [];
@@ -1556,14 +1558,14 @@ export function createView(canvas, options = {}) {
 		U.uRaise.value = smooth(THREE.MathUtils.clamp(k / 0.7, 0, 1));
 		const inK = smooth(THREE.MathUtils.clamp((k - 0.55) / 0.45, 0, 1));
 		POST.fin.uniforms.uTilt.value = rig.tiltOn * (1 - smooth(Math.min(1, k * 2.5)));
-		POST.fin.uniforms.uExposure.value = THREE.MathUtils.lerp(1.22, 2.3, inK);
-		scene.fog.color.lerpColors(topFogCol, walkFog, inK);
-		scene.fog.density = Math.exp(THREE.MathUtils.lerp(Math.log(topFog), Math.log(THEMES[curTheme].walkFogD ?? 0.036 / CELL_M), inK));
+		POST.fin.uniforms.uExposure.value = THREE.MathUtils.lerp(1.22, 2.3, inK) * look.exposure;
+		scene.fog.color.lerpColors(topFogCol, walkFog, inK).lerp(look.fogColor, look.fogMix);
+		scene.fog.density = Math.exp(THREE.MathUtils.lerp(Math.log(topFog), Math.log(lookTheme(curTheme).walkFogD ?? 0.036 / CELL_M), inK)) * look.fog;
 		curBg.lerpColors(curBgTop, walkBg, inK);
 		hemi.intensity = baseHemi.i * THREE.MathUtils.lerp(1, 0.34, inK);
 		dirL.intensity = baseHemi.dir * (1 - inK);
 		U.uFieldGain.value = THREE.MathUtils.lerp(1.1, 1, inK) * rig.light;
-		carried.intensity = inK * (THEMES[curTheme].carried ?? 1.7) * CELL_M * CELL_M;
+		carried.intensity = inK * (lookTheme(curTheme).carried ?? 1.7) * CELL_M * CELL_M;
 		carried.position.set(rig.eye.x, rig.eye.y + 0.25 * CELL_M, rig.eye.z);
 		const inside = camera.position.y < CEIL_TOP + 0.5;
 		for (const m of walkOnly) m.visible = inside;
@@ -1648,6 +1650,8 @@ export function createView(canvas, options = {}) {
 		setMasonry,
 		setScans,
 		setLevel,
+		look,
+		applyPalette: applyTheme,
 		setGraph,
 		frameMap,
 		setPixelCap,

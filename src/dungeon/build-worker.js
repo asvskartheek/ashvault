@@ -12,6 +12,8 @@ self.onmessage = ({ data }) => {
 	const t0 = performance.now();
 	const dungeon = generateDungeon(data.params);
 	const t1 = performance.now();
+	// The generator keeps its verdant rules; the palette only changes how the floor looks.
+	dungeon.params.palette = data.params.palette ?? 'verdant';
 	const level = buildLevel(dungeon);
 	self.postMessage({ type: 'level', id: data.id, dungeon, level, ms: { generate: t1 - t0, dress: performance.now() - t1 } }, transferList(level));
 };
