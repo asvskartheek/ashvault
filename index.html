@@ -93,6 +93,17 @@ canvas{position:fixed;inset:0;width:100%;height:100%;display:block;outline:none}
 #quests{position:absolute;top:18px;right:24px;display:flex;flex-direction:column;gap:5px;align-items:flex-end;max-width:min(300px,30vw)}
 #quests .q{font:700 14px var(--label);letter-spacing:.06em;color:var(--bone);text-shadow:0 1px 6px #000;padding:3px 9px;background:var(--plate);border-right:2px solid var(--gold)}
 #quests .q b{color:var(--gold);margin-left:8px;font-weight:800}
+#quests .q.main{border-right-width:4px;font-size:15px}
+#quests .q.main::before{content:"\25C6";color:var(--gold);margin-right:7px}
+#brief{position:absolute;top:9%;left:50%;transform:translate(-50%,-8px);text-align:center;opacity:0;transition:opacity .45s,transform .45s;pointer-events:none;padding:14px 34px 16px;background:linear-gradient(90deg,transparent,rgba(8,7,9,.82) 18%,rgba(8,7,9,.82) 82%,transparent)}
+#brief.on{opacity:1;transform:translate(-50%,0)}
+#brief .k{font:800 13px var(--label);letter-spacing:.42em;color:var(--gold)}
+#brief .t{font:900 clamp(26px,3.6vw,44px) var(--display);letter-spacing:.08em;color:var(--bone);margin:4px 0 6px;text-shadow:0 0 24px #000}
+#brief .g{font:700 16px var(--label);letter-spacing:.12em;color:var(--bone);opacity:.85}
+#brief .g b{color:var(--gold)}
+#mark{position:absolute;left:0;top:0;transform:translate(-50%,-50%);pointer-events:none;display:flex;flex-direction:column;align-items:center;gap:2px;opacity:0;transition:opacity .3s}
+#mark i{width:14px;height:14px;border:2px solid var(--gold);transform:rotate(45deg);box-shadow:0 0 12px var(--gold);background:rgba(255,200,90,.18)}
+#mark span{font:800 12px var(--label);letter-spacing:.1em;color:var(--gold);text-shadow:0 1px 4px #000}
 #quests .q.done{opacity:.45;border-right-color:var(--soul)}
 #quests .q.done b{color:var(--soul)}
 #party{position:absolute;top:18px;left:24px;display:flex;flex-direction:column;gap:4px}
@@ -119,6 +130,8 @@ canvas{position:fixed;inset:0;width:100%;height:100%;display:block;outline:none}
 		<div id="cross"></div>
 		<div id="banner"><div class="t"></div></div>
 		<div id="say"></div><div id="quests"></div><div id="party"></div>
+		<div id="brief"><div class="k">MISSION</div><div class="t"></div><div class="g"></div></div>
+		<div id="mark"><i></i><span></span></div>
 		<div id="d20"><svg viewBox="0 0 100 100"><polygon points="50,3 93,27 93,73 50,97 7,73 7,27" fill="#ffd27a" stroke="#6b4a14" stroke-width="3"/><polygon points="50,20 80,68 20,68" fill="none" stroke="#6b4a14" stroke-width="2.5"/><path d="M50 3 50 20M93 27 80 68M7 27 20 68M50 97 20 68M50 97 80 68M7 73 20 68M93 73 80 68M7 27 50 20M93 27 50 20" stroke="#6b4a14" stroke-width="2"/></svg><span></span></div>
 		<div id="hpTxt"></div>
 		<div id="vitals">

@@ -111,6 +111,7 @@ const LOOKS = { high: { cap: 1.25, budget: 1300000, ao: true, fx: 1, shadows: 2 
 let pixelCap = 1.25;
 
 async function buildFloor(n, { seed = (BASE_SEED + n * 7919) >>> 0, floorCmd = null } = {}) {
+	briefId = null;
 	mode = 'loading';
 	$('cover').style.display = '';
 	$('cover').classList.remove('done');
@@ -861,7 +862,8 @@ function onMouseDown(e) {
 	if (mode === 'pause') return resumePlay();
 	if (mode === 'dead') return deadReady && restart();
 	if (mode !== 'play') return;
-	if (document.pointerLockElement !== canvas) return lockPointer();
+	// Ask for the lock, but never swallow the click: where the browser refuses it, play on with free look.
+	if (document.pointerLockElement !== canvas) lockPointer();
 	if (e.button === 0) {
 		mouse.l = true;
 		mouse.lPressed = true;
@@ -938,6 +940,52 @@ async function descend() {
 	lockPointer();
 }
 
+const roomPos = (r) => ({ x: r.cx + 0.5 - dungeon.W / 2, z: r.cy + 0.5 - dungeon.H / 2 });
+function missionGoal() {
+	const q = activeMission();
+	if (!q || !dungeon) return null;
+	if ((q.goal === 'reach' || q.goal === 'cleanse') && dungeon.rooms[q.room]) return roomPos(dungeon.rooms[q.room]);
+	if (q.goal === 'boss') return R.boss && !R.boss.dead ? { x: R.boss.x, z: R.boss.z } : dungeon.rooms[dungeon.boss] ? roomPos(dungeon.rooms[dungeon.boss]) : null;
+	if (q.goal === 'kill') {
+		let best = null;
+		let bd = Infinity;
+		for (const e of enemies?.list ?? []) {
+			if (e.dead || (q.enemy && e.type !== q.enemy)) continue;
+			const d = Math.hypot(e.x - walker.x, e.z - walker.z);
+			if (d < bd) (bd = d), (best = { x: e.x, z: e.z });
+		}
+		if (best) return best;
+		// None up yet: the nearest uncleared room that holds them (or any uncleared room).
+		for (const r of dungeon.rooms) {
+			if (R.cleared.has(r.id) || r.type === 'entrance') continue;
+			const holds = !q.enemy || r.roster?.some((g) => g.enemy === q.enemy) || (r.roster == null && q.enemy !== 'ogre');
+			if (!holds) continue;
+			const p = roomPos(r);
+			const d = Math.hypot(p.x - walker.x, p.z - walker.z);
+			if (d < bd) (bd = d), (best = p);
+		}
+		return best;
+	}
+	return null;
+}
+const markV = new Vector3();
+function placeMark(goal) {
+	const m = $('mark');
+	if (mode !== 'play' || !view?.camera) return (m.style.opacity = '0');
+	markV.set(goal.x * CELL_M, (enemies?.floorY(goal.x, goal.z) ?? 0) + 2.2, goal.z * CELL_M).project(view.camera);
+	const behind = markV.z > 1;
+	let x = markV.x;
+	let y = markV.y;
+	if (behind) (x = -x), (y = -1);
+	const out = behind || Math.abs(x) > 0.92 || Math.abs(y) > 0.86;
+	x = Math.max(-0.92, Math.min(0.92, x));
+	y = Math.max(-0.86, Math.min(0.86, y));
+	m.style.left = `${(x * 0.5 + 0.5) * innerWidth}px`;
+	m.style.top = `${(-y * 0.5 + 0.5) * innerHeight}px`;
+	m.querySelector('span').textContent = `${Math.round(Math.hypot(goal.x - walker.x, goal.z - walker.z) * CELL_M)} m`;
+	m.style.opacity = out ? '0.7' : '1';
+}
+
 let bannerT = 0;
 function banner(text, dur) {
 	if (!text) return;
@@ -974,14 +1022,29 @@ addEventListener('blur', () => {
 	if (!TEST) pausePlay();
 });
 addEventListener('resize', () => view?.resize());
+let hadLock = false;
 document.addEventListener('pointerlockchange', () => {
-	if (!document.pointerLockElement && mode === 'play' && !TEST) pausePlay();
+	if (document.pointerLockElement) hadLock = true;
+	else if (hadLock && mode === 'play' && !TEST) pausePlay();
 });
+// Free look: with no pointer lock (refused, embedded browsers), the mouse still turns the view without a held button,
+// and resting the cursor near an edge keeps turning that way.
+let edgeX = 0;
+let edgeY = 0;
+const edge = (v, from) => (Math.abs(v) > from ? Math.sign(v) * Math.min(1, (Math.abs(v) - from) / (1 - from)) : 0);
 addEventListener('mousemove', (e) => {
-	if (document.pointerLockElement !== canvas || mode !== 'play') return;
+	if (mode !== 'play') return;
 	lookX += e.movementX;
 	lookY += e.movementY;
+	if (document.pointerLockElement === canvas) {
+		edgeX = edgeY = 0;
+		return;
+	}
+	edgeX = edge((e.clientX / innerWidth) * 2 - 1, 0.75);
+	edgeY = edge((e.clientY / innerHeight) * 2 - 1, 0.85);
 });
+document.addEventListener('mouseleave', () => (edgeX = edgeY = 0));
+addEventListener('blur', () => (edgeX = edgeY = 0));
 const axisF = () => (keys.has('KeyW') || keys.has('ArrowUp') ? 1 : 0) - (keys.has('KeyS') || keys.has('ArrowDown') ? 1 : 0) + pad.f;
 const axisS = () => (keys.has('KeyD') || keys.has('ArrowRight') ? 1 : 0) - (keys.has('KeyA') || keys.has('ArrowLeft') ? 1 : 0) + pad.s;
 
@@ -1179,6 +1242,10 @@ function play(dt, realDt) {
 	walker.pitch = Math.max(-1.3, Math.min(1.3, walker.pitch - lookY * k));
 	lookX = lookY = 0;
 	walker.yaw -= pad.lx * 3.2 * realDt;
+	if (document.pointerLockElement !== canvas) {
+		walker.yaw -= edgeX * 2.6 * realDt;
+		walker.pitch = Math.max(-1.3, Math.min(1.3, walker.pitch - edgeY * 1.4 * realDt));
+	}
 	walker.pitch = Math.max(-1.3, Math.min(1.3, walker.pitch - pad.ly * 2.2 * realDt));
 	// Actions.
 	const P = downed ? [] : pad.pressed;
@@ -1295,10 +1362,11 @@ function hud(dt) {
 	$('abFire').classList.toggle('low', R.mana < 25 * (1 - B('warcaster') * 0.25));
 	$('abPot').classList.toggle('low', R.potions === 0);
 	$('potN').textContent = R.potions;
-	// Compass: the next room that still holds the dead, on the way to the warden; then the rift.
+	// Compass and marker: the mission's target; with none, the next room that still holds the dead on the way to the warden; then the rift.
 	let goal = null;
 	if (rift) goal = { x: rift.x, z: rift.z };
-	else {
+	else goal = missionGoal();
+	if (!goal) {
 		for (const id of dungeon.path) {
 			if (R.cleared.has(id)) continue;
 			const r = dungeon.rooms[id];
@@ -1313,7 +1381,16 @@ function hud(dt) {
 		const x = 50 - (rel / (Math.PI / 2)) * 50;
 		$('goal').style.left = `${Math.max(0, Math.min(100, x))}%`;
 		$('goal').style.opacity = Math.abs(rel) > Math.PI / 2 ? '0.35' : '1';
-	} else $('goal').style.opacity = '0';
+		placeMark(goal);
+	} else {
+		$('goal').style.opacity = '0';
+		$('mark').style.opacity = '0';
+	}
+	if (briefT > 0) {
+		briefT -= dt;
+		if (briefT <= 0) $('brief').classList.remove('on');
+	}
+	if (mode === 'play' && !briefId && activeMission()) brief(activeMission());
 	if (bannerT > 0) {
 		bannerT -= dt;
 		if (bannerT <= 0) $('banner').style.opacity = '0';
@@ -1459,14 +1536,45 @@ function narrate(text, voice = 'dm') {
 	el.style.opacity = '1';
 	sayT = Math.max(4, text.length * 0.075);
 }
+// The mission: the first open quest. It gets the briefing card, the ◆ in the tracker, the compass and the marker.
+const activeMission = () => cur.quests.find((q) => !q.done && !q.hide) ?? null;
+let briefId = null;
+let briefT = 0;
+const plural = (e, n) => (n === 1 ? e : `${e}s`);
+function missionTarget(q) {
+	if (q.goal === 'kill') return `Slay <b>${q.n} ${plural(q.enemy ?? 'foe', q.n)}</b>`;
+	if (q.goal === 'reach') return 'Reach the <b>marked chamber</b>';
+	if (q.goal === 'cleanse') return 'Clear the <b>marked chamber</b>';
+	if (q.goal === 'boss') return 'Kill <b>the Warden</b>';
+	if (q.goal === 'survive') return `Survive <b>${q.n} seconds</b>`;
+	return '';
+}
+function brief(q) {
+	briefId = q.id;
+	// The floor's title rides on the card instead of its own banner, so the start of a floor reads as one thing.
+	const floorStart = $('banner').querySelector('.t').textContent.startsWith('FLOOR') && bannerT > 0;
+	if (floorStart) {
+		bannerT = 0;
+		$('banner').style.opacity = '0';
+	}
+	$('brief').querySelector('.k').textContent = floorStart ? `FLOOR ${roman(R.floor)} · MISSION` : 'NEW MISSION';
+	$('brief').querySelector('.t').textContent = q.title;
+	$('brief').querySelector('.g').innerHTML = `◆ ${missionTarget(q)}`;
+	$('brief').classList.add('on');
+	briefT = 5.5;
+}
 function renderQuests(list) {
+	const before = activeMission();
 	cur.quests = list;
+	const main = activeMission();
+	if (before && before.id !== main?.id && list.find((q) => q.id === before.id)?.done) banner('MISSION COMPLETE', 2.2);
+	if (main && main.id !== briefId && mode !== 'loading') brief(main);
 	$('quests').innerHTML = list
 		.filter((q) => !q.hide)
-		.map((q) => `<div class="q${q.done ? ' done' : ''}">${q.title.replace(/[<>&]/g, '')}${q.n > 1 || q.done ? `<b>${q.done ? '✓' : `${q.k}/${q.n}`}</b>` : ''}</div>`)
+		.map((q) => `<div class="q${q.done ? ' done' : ''}${q === main ? ' main' : ''}">${q.title.replace(/[<>&]/g, '')}${q.n > 1 || q.done ? `<b>${q.done ? '✓' : `${q.k}/${q.n}`}</b>` : ''}</div>`)
 		.join('');
 }
-const compactQuests = () => quests.list().map((q) => ({ id: q.id, title: q.title, k: q.k, n: q.n, done: q.done }));
+const compactQuests = () => quests.list().map((q) => ({ id: q.id, title: q.title, k: q.k, n: q.n, done: q.done, goal: q.goal, room: q.room, enemy: q.enemy }));
 function refreshQuests() {
 	const list = compactQuests();
 	renderQuests(list);
