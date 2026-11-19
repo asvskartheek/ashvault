@@ -145,7 +145,7 @@ td:first-child { width:28px; }
 <div class="card"><b>21 s</b><span>LFM warm-up · first load</span></div>
 <div class="card"><b>1 ms</b><span>worst main-thread gap while generating</span></div>
 <div class="card"><b>2.5 KB</b><span>host tick at 12 players + 30 enemies + 11 bots · cap 16 KB</span></div>
-<div class="card"><b class="warn">0 / 4</b><span>valid cmds from free LFM output → grammar-constrained decoding in progress</span></div>
+<div class="card"><b class="ok">10 / 10</b><span>LFM reactions valid with grammar-constrained decoding · was 0 free-form</span></div>
 </div>
 
 <h2>Status</h2>
@@ -154,7 +154,8 @@ td:first-child { width:28px; }
 <tr><td class="ok">✓</td><td>AI companions · multi-target enemies</td></tr>
 <tr><td class="ok">✓</td><td>Local multiplayer · host migration · late join</td></tr>
 <tr><td class="ok">✓</td><td>Patch test checks incl. dm-genesis, dm-react</td></tr>
-<tr><td class="warn">◐</td><td>LFM output quality (constrained decoding)</td></tr>
+<tr><td class="ok">✓</td><td>LFM grammar-constrained decoding · always valid world code</td></tr>
+<tr><td class="warn">◐</td><td>LFM content quality · 350M picks odd fields sometimes</td></tr>
 <tr><td class="todo">○</td><td>Real Patch rooms · Chrome Prompt API on a ready machine</td></tr>
 <tr><td class="todo">○</td><td>Release size: 255 MB model + 27 MB wasm vs Patch limit</td></tr>
 </table>
