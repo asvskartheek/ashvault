@@ -184,4 +184,5 @@ export const scripted = {
 		return JSON.stringify(scriptedProgram(req.kind, req.state, req.events));
 	},
 };
+export const createScriptedBackend = () => scripted;
 export default scripted;
