@@ -9,6 +9,16 @@ import { createAudio } from './game/audio.js';
 import { createFx, createNumbers } from './game/fx.js';
 import { createWeapon } from './game/weapon.js';
 import { createEnemies, loadEnemyAssets } from './game/enemies.js';
+import { createWorldAPI } from './world/api.js';
+import { createDM } from './dm/dm.js';
+import { createQuests } from './dm/quests.js';
+import { run as runProgram } from './dm/interpreter.js';
+import { scripted } from './dm/backends/scripted.js';
+import { systemFor } from './dm/prompt.js';
+import { programSchema, ENEMIES } from './dm/schema.js';
+import { createSession } from './net/session.js';
+import { createAvatars } from './net/avatars.js';
+import { createCompanions, NAMES as BOT_NAMES } from './party/bots.js';
 
 const $ = (id) => document.getElementById(id);
 const params = new URLSearchParams(location.search);
@@ -66,14 +76,14 @@ function say(v) {
 	return new Promise((r) => setTimeout(r));
 }
 
-function buildLevel(seed, rooms) {
+function buildLevel(seed, rooms, floorCmd) {
 	return new Promise((resolve, reject) => {
 		const worker = new Worker(new URL('./dungeon/build-worker.js', import.meta.url), { type: 'module' });
 		worker.onerror = (e) => reject(new Error(e.message));
 		worker.onmessage = ({ data }) => {
 			if (data.type === 'masonry') {
 				view.setMasonry(data);
-				worker.postMessage({ type: 'level', id: 1, params: { seed, rooms, loops: 0.35, decor: 0.6, theme: 'verdant' } });
+				worker.postMessage({ type: 'level', id: 1, params: { seed, rooms, loops: floorCmd?.loops ?? 0.35, decor: 0.6, theme: 'verdant', palette: floorCmd?.palette ?? 'verdant' } });
 				return;
 			}
 			worker.terminate();
@@ -100,7 +110,7 @@ function freshCanvas() {
 const LOOKS = { high: { cap: 1.25, budget: 1300000, ao: true, fx: 1, shadows: 2 }, medium: { cap: 1, budget: 1000000, ao: true, fx: 0.7, shadows: 2 }, low: { cap: 0.75, budget: 600000, ao: false, fx: 0.45, shadows: 1 } };
 let pixelCap = 1.25;
 
-async function buildFloor(n) {
+async function buildFloor(n, { seed = (BASE_SEED + n * 7919) >>> 0, floorCmd = null } = {}) {
 	mode = 'loading';
 	$('cover').style.display = '';
 	$('cover').classList.remove('done');
@@ -126,7 +136,7 @@ async function buildFloor(n) {
 	}
 	view.setScans(scans);
 	await say(0.45);
-	const built = await buildLevel((BASE_SEED + n * 7919) >>> 0, Math.min(22, 11 + n * 2));
+	const built = await buildLevel(seed, Math.max(8, Math.min(22, floorCmd?.rooms ?? 11 + n * 2)), floorCmd);
 	dungeon = built.dungeon;
 	view.setLevel(dungeon, built.level, { reveal: false });
 	await say(0.7);
@@ -142,7 +152,22 @@ async function buildFloor(n) {
 	walker = createWalker(dungeon);
 	walker.start();
 	enemies = createEnemies({ scene: view.scene, assets, dungeon, fx, audio, numbers, env: weapon.env });
+	enemies.puppet = !isHost();
 	rift = null;
+	floorLive = false;
+	remote.clear();
+	shown.clear();
+	lastRoom = -2;
+	companions = createCompanions({ dungeon, enemies, fx, audio, floorY: (x, z) => enemies.floorY(x, z) });
+	avatars = createAvatars({ scene: view.scene, assets, env: weapon.env, floorY: (x, z) => enemies.floorY(x, z) });
+	world = createWorldAPI({
+		view, dungeon, enemies, fx, audio, R, quests, hud: hudApi,
+		get authority() { return isHost(); },
+		spawnAt: (type, x, z, o) => { if (enemies.alive < 24) enemies.spawn(type, x, z, { roomId: o?.roomId, level: o?.level ?? R.floor }); },
+		roomCells, partyPos: () => ({ x: walker.x, z: walker.z }),
+		heal, addXp: gainXp, hurt: (k) => { R.hp = Math.max(1, R.hp - k); }, relay,
+	});
+	world.applyPalette(floorCmd?.palette ?? 'verdant');
 	R.cleared = new Set();
 	R.active = new Set();
 	R.pending = {};
@@ -155,10 +180,12 @@ async function buildFloor(n) {
 	// Warm every shader: one of each enemy, a fireball and a burst, drawn once out of sight.
 	const warm = ['hollow', 'revenant', 'wisp', 'ogre'].map((t) => enemies.spawn(t, walker.x + Math.sin(walker.yaw) * -3, walker.z + Math.cos(walker.yaw) * -3, { rise: false }));
 	fx.explosion(0, -50, 0, 0.1);
+	avatars.upsert('warm', { x: walker.x, z: walker.z, yaw: 0, anim: 'attack' }, { name: 'x' });
 	view.frame(0, 0);
 	view.frame(0, 0);
 	enemies.clear();
-	$('floorName').textContent = `${roman(n)} · ${dungeon.name.replace(/^The /, '')}`;
+	avatars.remove('warm');
+	$('floorName').textContent = `${roman(n)} · ${(floorCmd?.name ?? dungeon.name).replace(/^The /, '')}`;
 	await say(1);
 	$('cover').classList.add('done');
 	setTimeout(() => $('cover').classList.contains('done') && ($('cover').style.display = 'none'), 700);
@@ -345,7 +372,7 @@ function swordStrike() {
 		if ((dx * fx0 + dz * fz0) / (d || 1) < arc && d > 0.5) continue;
 		any = true;
 		const dmg = 20 * (1 + B('savage') * 0.25) * r.mult;
-		const res = enemies.hurt(e, dmg, { kx: (dx / (d || 1)) * (r.crit ? 9 : 4.5), kz: (dz / (d || 1)) * (r.crit ? 9 : 4.5) });
+		const res = hurtEnemy(e, dmg, { kx: (dx / (d || 1)) * (r.crit ? 9 : 4.5), kz: (dz / (d || 1)) * (r.crit ? 9 : 4.5) }, 'sword', r.crit);
 		if (!res) continue;
 		const y = res.y + e.T.height * 0.55;
 		fx.sparks(e.x * CELL_M, y, e.z * CELL_M, r.crit ? 34 : 14, e.T.boss ? [3, 0.6, 0.3] : [3, 2, 1]);
@@ -406,7 +433,7 @@ function explodeFire(p, r) {
 		const d = Math.hypot(e.x - cx, e.z - cz);
 		if (d > radius + e.radius) continue;
 		const k = 1 - Math.min(1, d / (radius + e.radius)) * 0.5;
-		const res = enemies.hurt(e, base * k, { kx: ((e.x - cx) / (d || 1)) * 7, kz: ((e.z - cz) / (d || 1)) * 7, fire: true });
+		const res = hurtEnemy(e, base * k, { kx: ((e.x - cx) / (d || 1)) * 7, kz: ((e.z - cz) / (d || 1)) * 7, fire: true }, 'fire', r.crit);
 		if (!res) continue;
 		hitAny = true;
 		numbers.show(e.x * CELL_M, res.y + e.T.height * 0.7, e.z * CELL_M, r.crit ? `${res.dmg}!` : String(res.dmg), r.crit ? 'crit' : 'fire');
@@ -429,9 +456,17 @@ function fireballTest(p, b) {
 	const fy = floorAt(dungeon, cx + dungeon.W / 2, cz + dungeon.H / 2) * CELL_M;
 	if (p.y < fy + 0.05 || p.y > fy + 6) return true;
 	if (b.kind === 'bolt') {
-		if (Math.hypot(cx - walker.x, cz - walker.z) < 0.35 && Math.abs(p.y - view.camera.position.y) < 1.2) {
-			hitPlayer(b.owner, b.dmg, 'bolt');
-			return true;
+		for (const t of tgtList) {
+			if (!t.alive) continue;
+			if (t.id === 'me') {
+				if (Math.hypot(cx - walker.x, cz - walker.z) < 0.35 && Math.abs(p.y - view.camera.position.y) < 1.2) {
+					hitPlayer(b.owner, b.dmg, 'bolt');
+					return true;
+				}
+			} else if (Math.hypot(cx - t.x, cz - t.z) < 0.4 && Math.abs(p.y - (enemies.floorY(t.x, t.z) + 1.1)) < 1.1) {
+				hooks.hitActor(b.owner, t.id, b.dmg, 'bolt');
+				return true;
+			}
 		}
 		return false;
 	}
@@ -455,13 +490,14 @@ function shockwave() {
 	audio.shockwave();
 	addShake(0.7);
 	fovKick = 6;
+	action('shockwave');
 	for (const e of enemies.list) {
 		if (e.dead) continue;
 		const dx = e.x - walker.x;
 		const dz = e.z - walker.z;
 		const d = Math.hypot(dx, dz);
 		if (d > radius) continue;
-		const res = enemies.hurt(e, 22 * (1 + B('quake') * 0.3), { kx: (dx / (d || 1)) * 12, kz: (dz / (d || 1)) * 12 });
+		const res = hurtEnemy(e, 22 * (1 + B('quake') * 0.3), { kx: (dx / (d || 1)) * 12, kz: (dz / (d || 1)) * 12 }, 'blast');
 		if (!res) continue;
 		numbers.show(e.x * CELL_M, res.y + e.T.height * 0.7, e.z * CELL_M, String(res.dmg), '');
 		if (res.killed) onKill(e);
@@ -483,6 +519,7 @@ function dodge(f, s) {
 	R.dashZ = ((-cos * mx - sin * ms) / l) * 11;
 	fovKick = 5;
 	audio.dodge();
+	action('dodge');
 }
 
 function drinkPotion() {
@@ -492,6 +529,7 @@ function drinkPotion() {
 	heal(45);
 	audio.pickup();
 	flash(0.4, 1, 0.5, 0.25);
+	action('potion');
 }
 
 function heal(n) {
@@ -501,11 +539,12 @@ function heal(n) {
 }
 
 function hitPlayer(e, dmg, kind) {
-	if (mode !== 'play') return;
+	if (mode !== 'play' || R.down) return;
 	if (R.iframes > 0) {
 		if (kind !== 'bolt') numbers.show(walker.x * CELL_M - Math.sin(walker.yaw), view.camera.position.y, walker.z * CELL_M - Math.cos(walker.yaw), 'DODGED', 'xp');
 		return;
 	}
+	dmg *= world?.mods.taken ?? 1;
 	R.hp -= dmg;
 	R.regenDelay = 4;
 	addShake(0.5);
@@ -526,7 +565,7 @@ function hitPlayer(e, dmg, kind) {
 		R.dashT = 0.1;
 	}
 	if (TEST && R.hp < 30) R.hp = 30;
-	if (R.hp <= 0) die();
+	if (R.hp <= 0) (net() && session.players.length > 1 ? goDown() : die());
 }
 
 let flashK = 0;
@@ -535,25 +574,42 @@ function flash(r, g, b, k) {
 	flashK = Math.max(flashK, k);
 }
 
-function onKill(e) {
-	R.kills++;
+// A kill, counted once. `who` is 'me', a remote player's id, or 'bot' (the host scans for kills nobody reported).
+function onKill(e, who = 'me') {
+	if (e._k) return;
+	e._k = true;
+	const mine = who === 'me';
 	const xp = Math.round(e.T.xp * (1 + (R.floor - 1) * 0.2));
-	numbers.show(e.x * CELL_M, enemies.floorY(e.x, e.z) + e.T.height + 0.3, e.z * CELL_M, `+${xp} XP`, 'xp');
-	gainXp(xp);
-	if (TEST) testPass('enemy-killed');
-	if (e.T.boss) {
+	if (mine) {
+		R.kills++;
+		numbers.show(e.x * CELL_M, enemies.floorY(e.x, e.z) + e.T.height + 0.3, e.z * CELL_M, `+${xp} XP`, 'xp');
+		gainXp(xp);
+		if (TEST) testPass('enemy-killed');
+		if (Math.random() < 0.06 + (e.T.armor > 0.15 ? 0.08 : 0)) {
+			R.potions = Math.min(5, R.potions + 1);
+			audio.pickup();
+		}
+	} else if (who !== 'bot') session?.send('fx', { k: 'xp', n: xp }, { to: who });
+	if (e.warden) {
 		R.bossAlive = false;
-		$('bossbar').classList.add('off');
 		banner('THE WARDEN FALLS', 3);
 		audio.levelUp();
-		slowMo = 1.2;
-		R.potions = Math.min(5, R.potions + 1);
+		slowMo = net() ? 0 : 1.2;
+		if (mine) R.potions = Math.min(5, R.potions + 1);
 		openRift(e.x, e.z);
+		session?.send('fx', { k: 'rift', x: e.x, z: e.z });
+		emit({ type: 'boss_dead' });
 	}
-	if (Math.random() < 0.06 + (e.T.armor > 0.15 ? 0.08 : 0)) {
-		R.potions = Math.min(5, R.potions + 1);
-		audio.pickup();
+	emit({ type: 'kill', enemy: e.type, room: e.roomId, who: mine ? myId() : who });
+}
+
+// Host: damage reaches a puppet's owner as a message. Client: ask the host, show the hit anyway.
+function hurtEnemy(e, dmg, opts, kind = 'sword', crit = false) {
+	if (!isHost()) {
+		session.send('hit', { eid: e.id, dmg: Math.round(dmg), crit, kind });
+		return { dmg: Math.round(dmg), killed: false, y: enemies.floorY(e.x, e.z) };
 	}
+	return enemies.hurt(e, dmg, opts);
 }
 
 function gainXp(n) {
@@ -639,40 +695,57 @@ function pickType(elite) {
 	return 'hollow';
 }
 
-function wake(room) {
+function wake(room, at = walker) {
 	R.active.add(room.id);
-	const cells = roomCells(room).filter((c) => Math.hypot(c.x - walker.x, c.z - walker.z) > 2.2);
+	const cells = roomCells(room).filter((c) => Math.hypot(c.x - at.x, c.z - at.z) > 2.2);
 	if (!cells.length) {
 		R.cleared.add(room.id);
 		return;
 	}
 	const f = R.floor;
-	let n = room.type === 'elite' ? 5 + f : room.type === 'boss' ? 2 + Math.floor(f / 2) : 3 + Math.floor(f * 0.8) + Math.floor(Math.random() * 2);
-	n = Math.max(1, Math.min(n, 12 - enemies.alive));
-	if (room.type === 'boss') {
-		const mid = cells.reduce((a, c) => (Math.hypot(c.x - (room.cx + 0.5 - dungeon.W / 2), c.z - (room.cy + 0.5 - dungeon.H / 2)) < Math.hypot(a.x - (room.cx + 0.5 - dungeon.W / 2), a.z - (room.cy + 0.5 - dungeon.H / 2)) ? c : a));
-		const boss = enemies.spawn('ogre', mid.x, mid.z, { roomId: room.id, level: f });
-		R.boss = boss;
-		R.bossAlive = true;
-		$('bossName').textContent = `WARDEN OF ${dungeon.name.split(' of ').pop().toUpperCase()}`;
-		$('bossbar').classList.remove('off');
-		audio.roar();
-		addShake(0.6);
-		banner('', 0);
-	}
-	R.pending[room.id] = n;
-	const floorAtWake = R.floor;
-	for (let i = 0; i < n; i++) {
-		const c = cells[Math.floor(Math.random() * cells.length)];
+	const cx = room.cx + 0.5 - dungeon.W / 2;
+	const cz = room.cy + 0.5 - dungeon.H / 2;
+	const spawnLater = (type, c, i, lvl) => {
 		setTimeout(() => {
 			R.pending[room.id]--;
 			if (!enemies || mode === 'loading' || R.floor !== floorAtWake) return;
-			enemies.spawn(pickType(room.type === 'elite'), c.x + (Math.random() - 0.5) * 0.4, c.z + (Math.random() - 0.5) * 0.4, { roomId: room.id, level: f });
+			enemies.spawn(type, c.x + (Math.random() - 0.5) * 0.4, c.z + (Math.random() - 0.5) * 0.4, { roomId: room.id, level: lvl });
 			if (TEST) testPass('enemy-rises');
 		}, i * 260 + Math.random() * 200);
+	};
+	const floorAtWake = R.floor;
+	if (room.type === 'boss') {
+		const mid = cells.reduce((a, c) => (Math.hypot(c.x - cx, c.z - cz) < Math.hypot(a.x - cx, a.z - cz) ? c : a));
+		const boss = enemies.spawn('ogre', mid.x, mid.z, { roomId: room.id, level: f });
+		boss.warden = true;
+		R.boss = boss;
+		R.bossAlive = true;
+		audio.roar();
+		addShake(0.6);
+		session?.send('fx', { k: 'roar' });
 	}
+	// The DM's guard roster if it set one, else the old defaults.
+	const plan = [];
+	if (room.roster?.length) {
+		for (const g of room.roster) for (let i = 0; i < g.n; i++) plan.push([g.enemy, Math.max(f, g.level ?? 0)]);
+		plan.length = Math.max(1, Math.min(plan.length, 14 - enemies.alive));
+	} else {
+		let n = room.type === 'elite' ? 5 + f : room.type === 'boss' ? 2 + Math.floor(f / 2) : 3 + Math.floor(f * 0.8) + Math.floor(Math.random() * 2);
+		n = Math.max(1, Math.min(n, 12 - enemies.alive));
+		for (let i = 0; i < n; i++) plan.push([pickType(room.type === 'elite'), f]);
+	}
+	R.pending[room.id] = plan.length;
+	plan.forEach(([type, lvl], i) => spawnLater(type, cells[Math.floor(Math.random() * cells.length)], i, lvl));
 	audio.rise();
 	audio.door();
+}
+
+// Host: a player (me or a remote one) stepped into a room.
+function hostWake(id, who) {
+	const room = dungeon?.rooms[id];
+	if (!room || R.cleared.has(id) || R.active.has(id) || !(room.type === 'combat' || room.type === 'elite' || room.type === 'boss')) return;
+	const at = who === myId() || !remote.has(who) ? walker : remote.get(who);
+	wake(room, at);
 }
 
 function ambush() {
@@ -685,25 +758,48 @@ function ambush() {
 	audio.rise();
 }
 
+let lastRoom = -2;
+function trackRoom() {
+	const r = walker.room();
+	const id = r ? r.id : -1;
+	if (id === lastRoom) return;
+	lastRoom = id;
+	if (id >= 0) emit({ type: 'enter', room: id, role: r.type });
+}
+
 function updateRooms(dt) {
 	const room = walker.room();
 	if (room && !R.cleared.has(room.id) && !R.active.has(room.id)) {
-		if (room.type === 'combat' || room.type === 'elite' || room.type === 'boss') wake(room);
-		else if (room.type === 'shrine') {
+		if (room.type === 'combat' || room.type === 'elite' || room.type === 'boss') {
+			// the host wakes it from the enter event; a client waits for the host's dead
+		} else if (room.type === 'shrine') {
 			R.cleared.add(room.id);
 			heal(R.maxHp);
 			R.mana = R.maxMana;
 			banner('SHRINE · RESTORED', 1.8);
 			audio.levelUp();
 			flash(0.5, 1, 0.9, 0.3);
+			emit({ type: 'shrine' });
 		} else if (room.type === 'treasure') {
 			R.cleared.add(room.id);
 			R.potions = Math.min(5, R.potions + 2);
 			banner('TREASURE · +2 POTIONS', 1.8);
 			audio.pickup();
 			gainXp(25);
+			emit({ type: 'treasure' });
 		} else R.cleared.add(room.id);
 	}
+	// The warden's bar follows whoever the puppets or the host say is the boss.
+	const boss = enemies.list.find((e) => e.T.boss && !e.dead);
+	if (boss) {
+		if ($('bossbar').classList.contains('off')) {
+			$('bossName').textContent = `WARDEN OF ${dungeon.name.split(' of ').pop().toUpperCase()}`;
+			$('bossbar').classList.remove('off');
+		}
+		$('bossbar').querySelector('i').style.transform = `scaleX(${Math.max(0, boss.hp / boss.maxHp)})`;
+		$('bossbar').querySelector('b').style.transform = `scaleX(${Math.max(0, boss.hp / boss.maxHp)})`;
+	} else $('bossbar').classList.add('off');
+	if (!isHost()) return;
 	for (const id of R.active) {
 		if (R.pending[id] > 0 || enemies.list.some((e) => e.roomId === id && !e.dead)) continue;
 		R.active.delete(id);
@@ -711,7 +807,9 @@ function updateRooms(dt) {
 		if (dungeon.rooms[id].type !== 'boss') {
 			heal(8);
 			gainXp(10);
+			session?.send('fx', { k: 'clear' });
 		}
+		emit({ type: 'room_clear', room: id });
 	}
 	// Quiet halls don't stay quiet.
 	R.ambushT -= dt;
@@ -720,8 +818,6 @@ function updateRooms(dt) {
 		if (enemies.alive < 3 && !R.bossAlive) ambush();
 	}
 	if (R.bossAlive && R.boss) {
-		$('bossbar').querySelector('i').style.transform = `scaleX(${Math.max(0, R.boss.hp / R.boss.maxHp)})`;
-		$('bossbar').querySelector('b').style.transform = `scaleX(${Math.max(0, R.boss.hp / R.boss.maxHp)})`;
 		R.bossAdds = (R.bossAdds ?? 10) - dt;
 		if (R.bossAdds <= 0) {
 			R.bossAdds = 11;
@@ -761,7 +857,7 @@ function lockPointer() {
 function onMouseDown(e) {
 	lastDevice = 'kb';
 	audio.resume();
-	if (mode === 'title') return start();
+	if (mode === 'title') return;
 	if (mode === 'pause') return resumePlay();
 	if (mode === 'dead') return deadReady && restart();
 	if (mode !== 'play') return;
@@ -782,16 +878,8 @@ addEventListener('mouseup', (e) => {
 for (const id of ['title', 'pause', 'dead']) $(id).addEventListener('mousedown', (e) => onMouseDown(e));
 $('title').addEventListener('contextmenu', (e) => e.preventDefault());
 
-function start() {
-	$('title').classList.add('off');
-	$('hud').classList.remove('off');
-	mode = 'play';
-	audio.resume();
-	lockPointer();
-	last = performance.now();
-}
 function pausePlay() {
-	if (mode !== 'play') return;
+	if (mode !== 'play' || net()) return;
 	mode = 'pause';
 	keys.clear();
 	mouse.l = mouse.r = false;
@@ -826,15 +914,27 @@ async function restart() {
 	deadReady = false;
 	$('dead').classList.add('off');
 	newRun();
-	await buildFloor(1);
+	dm?.stop();
+	dm = null;
+	quests.load([]);
+	await startHostFloor(1, true);
 	mode = 'play';
 	lockPointer();
 }
+let descending = false;
+// Any player at the rift asks; the host decides, and everyone rebuilds from its shared state.
 async function descend() {
+	if (descending) return;
+	descending = true;
+	if (!isHost()) {
+		session.send('ev', { event: { type: 'descend' } });
+		return;
+	}
 	mode = 'descend';
 	R.floor++;
-	await buildFloor(R.floor);
+	await startHostFloor(R.floor);
 	mode = 'play';
+	descending = false;
 	lockPointer();
 }
 
@@ -848,11 +948,11 @@ function banner(text, dur) {
 
 // ---------------------------------------------------------------- input
 addEventListener('keydown', (e) => {
+	if (e.target?.tagName === 'INPUT') return;
 	lastDevice = 'kb';
 	audio.resume();
 	if (e.repeat) return;
 	keys.add(e.code);
-	if (mode === 'title' && (e.code === 'Space' || e.code === 'Enter')) return start();
 	if (mode === 'boons') {
 		if (e.code.startsWith('Digit')) pickBoon(Number(e.code.slice(5)) - 1);
 		if (e.code === 'ArrowLeft' || e.code === 'KeyA') selBoon(boonSel - 1);
@@ -909,10 +1009,7 @@ function readPad() {
 	pad.lx = Math.sign(lx) * lx * lx;
 	pad.ly = Math.sign(ly) * ly * ly;
 	if (pad.pressed.some(Boolean) || Math.hypot(p.axes[0], p.axes[1]) > 0.5 || Math.hypot(p.axes[2], p.axes[3]) > 0.5) {
-		if (lastDevice !== 'pad') {
-			lastDevice = 'pad';
-			$('goTxt').textContent = 'Press any button';
-		}
+		lastDevice = 'pad';
 		audio.resume();
 	}
 	padRef = p;
@@ -924,7 +1021,6 @@ function rumble(strong, ms) {
 function padMenus() {
 	const P = pad.pressed;
 	if (!P.length) return;
-	if (mode === 'title' && P.some(Boolean)) return start();
 	if (mode === 'pause' && (P[0] || P[9])) return resumePlay();
 	if (mode === 'dead' && P[0] && deadReady) return restart();
 	if (mode === 'boons') {
@@ -991,7 +1087,8 @@ function frame(raw) {
 		if (mode === 'title') walker.yaw += dt * 0.04;
 		syncEye(dt);
 		placeLights(dt);
-		if (mode === 'dead') enemies.update(dt, walker, hooks);
+		if (net() && mode !== 'title') simStep(dt);
+		else if (mode === 'dead') stepEnemies(dt);
 		fx.update(dt, pxScale(), fireballTest);
 		weapon.update(dt, { aspect: view.rig.aspect, moving: false, speed: 0, time, mana: R.mana / R.maxMana });
 		numbers.update(dt, view.camera, innerWidth, innerHeight);
@@ -1000,6 +1097,7 @@ function frame(raw) {
 	}
 	// Hit-stop and slow motion bend game time; the camera and UI keep real time.
 	const realDt = dt;
+	if (net()) hitStop = slowMo = 0;
 	if (hitStop > 0) {
 		hitStop -= realDt;
 		dt *= 0.05;
@@ -1015,6 +1113,10 @@ function frame(raw) {
 
 const hooks = {
 	hitPlayer: (e, dmg) => hitPlayer(e, dmg),
+	hitActor(e, id, dmg, kind) {
+		if (id.startsWith('bot:')) companions.hit(id, dmg);
+		else session?.send('dmg', { to: id, dmg, kind }, { to: id });
+	},
 	whiff: () => audio.swing(3),
 	slam(e, radius) {
 		const y = enemies.floorY(e.x, e.z);
@@ -1039,11 +1141,12 @@ const hooks = {
 	windup(e) {
 		if (e.type === 'revenant') audio.swing(2);
 	},
-	bolt(e) {
+	bolt(e, tgt) {
 		const y = e.root.position.y + 1.35;
-		const tx = walker.x * CELL_M;
-		const tz = walker.z * CELL_M;
-		const ty = view.camera.position.y - 0.25;
+		const mine = !tgt || tgt.id === 'me';
+		const tx = (mine ? walker.x : tgt.x) * CELL_M;
+		const tz = (mine ? walker.z : tgt.z) * CELL_M;
+		const ty = mine ? view.camera.position.y - 0.25 : enemies.floorY(tgt.x, tgt.z) + 1.1;
 		const sx = e.x * CELL_M + Math.sin(e.yaw) * 0.25;
 		const sz = e.z * CELL_M + Math.cos(e.yaw) * 0.25;
 		const d = new Vector3(tx - sx, ty - y, tz - sz).normalize();
@@ -1067,8 +1170,9 @@ function pxScale() {
 
 let stepT = 0;
 function play(dt, realDt) {
-	const f = Math.max(-1, Math.min(1, axisF()));
-	const s = Math.max(-1, Math.min(1, axisS()));
+	const downed = R.down;
+	const f = downed ? 0 : Math.max(-1, Math.min(1, axisF()));
+	const s = downed ? 0 : Math.max(-1, Math.min(1, axisS()));
 	// Look.
 	const k = LOOK * (view.rig.fov / 72);
 	walker.yaw -= lookX * k;
@@ -1077,13 +1181,14 @@ function play(dt, realDt) {
 	walker.yaw -= pad.lx * 3.2 * realDt;
 	walker.pitch = Math.max(-1.3, Math.min(1.3, walker.pitch - pad.ly * 2.2 * realDt));
 	// Actions.
-	const P = pad.pressed;
+	const P = downed ? [] : pad.pressed;
+	if (downed) mouse.l = mouse.r = mouse.lPressed = mouse.rPressed = false;
 	if (TEST) autopilot(dt);
 	if (mouse.lPressed || P[7] || P[5]) {
 		const n = weapon.attack(1 + B('mobile') * 0.05);
 		if (n >= 0) audio.swing(n);
 	}
-	if ((mouse.l || pad.down[7]) && !weapon.swinging) {
+	if ((mouse.l || (!downed && pad.down[7])) && !weapon.swinging) {
 		const n = weapon.attack(1);
 		if (n >= 0) audio.swing(n);
 	}
@@ -1095,7 +1200,9 @@ function play(dt, realDt) {
 
 	// Move.
 	const sprint = keys.has('ShiftLeft') || keys.has('ShiftRight') || pad.down[10];
-	const speed = (sprint ? RUN : WALK) * (1 + B('mobile') * 0.12) * (weapon.swinging ? 0.8 : 1);
+	const speed = (sprint ? RUN : WALK) * (1 + B('mobile') * 0.12) * (weapon.swinging ? 0.8 : 1) * (world?.mods.speed ?? 1);
+	const px = walker.x;
+	const pz = walker.z;
 	if (R.dashT > 0) {
 		R.dashT -= dt;
 		walker.step(dt, 0, 0, 0);
@@ -1118,6 +1225,13 @@ function play(dt, realDt) {
 		}
 	}
 	walker.step(0.0001, 0, 0, 0);
+	// A sealed room keeps its door shut.
+	const into = walker.room();
+	if (into && world?.isSealed(into.id) && lastRoom !== into.id) {
+		walker.x = px;
+		walker.z = pz;
+		walker.step(0.0001, 0, 0, 0);
+	}
 	if (walker.speedNow > 1.5) {
 		stepT -= dt * walker.speedNow;
 		if (stepT <= 0) {
@@ -1143,8 +1257,8 @@ function play(dt, realDt) {
 
 	const ev = weapon.update(realDt * (hitStop > 0 ? 0.15 : 1), { aspect: view.rig.aspect, moving: walker.speedNow > 0.5, speed: walker.speedNow, time, mana: Math.min(1, R.mana / 25) });
 	if (ev === 'strike') swordStrike();
-	enemies.update(dt, walker, hooks);
-	updateRooms(dt);
+	if (R.down) downTick(dt);
+	simStep(dt);
 	fx.update(dt, pxScale(), fireballTest);
 	if (rift) {
 		rift.t += dt;
@@ -1204,6 +1318,7 @@ function hud(dt) {
 		bannerT -= dt;
 		if (bannerT <= 0) $('banner').style.opacity = '0';
 	}
+	if (sayT > 0 && (sayT -= dt) <= 0) $('say').style.opacity = '0';
 }
 
 // Holds the frame rate: the picture gets a little softer before it ever stutters, and sharpens again when there's room.
@@ -1282,21 +1397,634 @@ function autopilot(dt) {
 	else keys.delete('KeyW');
 }
 
-// ---------------------------------------------------------------- go
-(async function boot() {
-	newRun();
+// ---------------------------------------------------------------- the Dungeon Master, the party, the wire
+let session = null;
+let dm = null;
+let floorLive = false;
+let world = null;
+let companions = null;
+let avatars = null;
+let genesisLogged = false;
+let reactLogged = false;
+let seqN = 0;
+let popCmds = null;
+let floorCmdNow = null;
+let floorSeed = 0;
+let wasHost = true;
+let lastShared = null;
+let builtKey = '';
+let appliedKey = '';
+let building = false;
+let sharedAt = 0;
+let hAcc = 0;
+let pAcc = 0;
+let botAcc = 0;
+let uiAcc = 0;
+let lowHpAt = -99;
+let backend = scripted;
+const remote = new Map(); // id -> latest state from that player's `p`
+const shown = new Set(); // avatar ids drawn from the host's tick
+const tgtList = [];
+const actionAt = {};
+const cur = { quests: [] };
+const BOT_ANIM = ['idle', 'walk', 'attack', 'attack', 'die'];
+const REWARD = { heal: 40, mana: 50, potion: 25, xp: 60, haste: 30, ward: 30 };
+
+const net = () => !!session && session.mode !== 'solo';
+const isHost = () => !session || session.isHost;
+const myId = () => session?.me?.id ?? 'solo';
+const nameOf = (id) => (id === myId() ? myName() : session?.players.find((p) => p.id === id)?.name ?? (id.startsWith('bot:') ? BOT_NAMES[+id.slice(4) % BOT_NAMES.length] : id));
+const myName = () => (net() ? session.me.name : 'The Knight');
+
+const quests = createQuests({
+	onEvent(e) {
+		dm?.observe(e);
+		refreshQuests();
+	},
+	pay: (reward) => reward && world?.bless(reward, REWARD[reward] ?? 25, 'all'),
+});
+
+function partyList() {
+	const humans = net() ? session.players.map((p) => ({ id: p.id, name: nameOf(p.id), bot: false })) : [{ id: myId(), name: myName(), bot: false }];
+	return [...humans, ...(companions?.list ?? []).map((b) => ({ id: b.id, name: b.name, bot: true }))];
+}
+const humanCount = () => (net() ? session.players.length : 1);
+
+// ---- narration, quest tracker, party
+let sayT = 0;
+function narrate(text, voice = 'dm') {
+	const el = $('say');
+	el.textContent = text;
+	el.className = voice === 'dm' ? '' : voice;
+	el.style.opacity = '1';
+	sayT = Math.max(4, text.length * 0.075);
+}
+function renderQuests(list) {
+	cur.quests = list;
+	$('quests').innerHTML = list
+		.filter((q) => !q.hide)
+		.map((q) => `<div class="q${q.done ? ' done' : ''}">${q.title.replace(/[<>&]/g, '')}${q.n > 1 || q.done ? `<b>${q.done ? '✓' : `${q.k}/${q.n}`}</b>` : ''}</div>`)
+		.join('');
+}
+const compactQuests = () => quests.list().map((q) => ({ id: q.id, title: q.title, k: q.k, n: q.n, done: q.done }));
+function refreshQuests() {
+	const list = compactQuests();
+	renderQuests(list);
+	if (net() && isHost()) session.send('fx', { k: 'quests', q: list });
+}
+const hudApi = { say: narrate, quests: renderQuests, banner, shake: addShake, flash };
+
+function renderParty() {
+	const el = $('party');
+	const code = net() && session.code ? `<div id="code" title="Copy invite">${session.code.replace(/[<>&]/g, '')}</div>` : '';
+	const rows = [];
+	const pips = (f) => Array.from({ length: 5 }, (_, i) => `<i class="${f > i / 5 + 0.01 ? 'on' : ''}"></i>`).join('');
+	const nm = (t) => String(t).replace(/[<>&]/g, '');
+	const bots = isHost() ? (companions?.list ?? []).map((b) => ({ name: b.name, f: Math.max(0, b.hp) / b.maxHp, down: b.state === 'down' })) : [...remote].filter(([id]) => id.startsWith('bot:')).map(([id, b]) => ({ name: nameOf(id), f: b.hp / 100, down: b.down }));
+	if (humanCount() + bots.length > 1) {
+		rows.push(`<div class="m${R.down ? ' down' : ''}">${nm(myName())}<span class="p">${pips(R.hp / R.maxHp)}</span></div>`);
+		for (const p of net() ? session.players : []) {
+			if (p.id === myId()) continue;
+			const st = remote.get(p.id);
+			rows.push(`<div class="m${st && st.hp <= 0 ? ' down' : ''}">${nm(nameOf(p.id))}<span class="p">${pips(st ? st.hp / 100 : 1)}</span></div>`);
+		}
+		for (const b of bots) rows.push(`<div class="m${b.down ? ' down' : ''}">${nm(b.name)}<span class="p">${pips(b.f)}</span></div>`);
+	}
+	el.innerHTML = code + rows.join('');
+	const c = $('code');
+	if (c) c.onclick = () => session.invite?.().catch?.(() => {});
+}
+
+// ---- events: every one reaches the quest book and the DM (on the host), or the host (from a client)
+function action(what) {
+	const t = performance.now();
+	if (t - (actionAt[what] ?? -1e9) < 12000) return;
+	actionAt[what] = t;
+	emit({ type: 'action', what });
+}
+function emit(e) {
+	if (!floorLive) return;
+	if (!isHost()) {
+		if (e.type === 'kill' || e.type === 'boss_dead' || e.type === 'room_clear') return;
+		session.send('ev', { event: e });
+		return;
+	}
+	e.who ??= myId();
+	hostObserve(e);
+}
+function hostObserve(e) {
+	if (e.type === 'enter') hostWake(e.room, e.who);
+	quests.observe(e);
+	dm?.observe(e);
+}
+function hostEvent(from, ev) {
+	if (!ev || typeof ev.type !== 'string' || !floorLive) return;
+	if (ev.type === 'descend') return void (rift && descend());
+	if (!['enter', 'action', 'shrine', 'treasure', 'low_hp', 'down'].includes(ev.type)) return;
+	const e = { type: ev.type, who: from };
+	if (ev.type === 'enter') {
+		if (!Number.isInteger(ev.room) || !dungeon.rooms[ev.room]) return;
+		e.room = ev.room;
+		e.role = dungeon.rooms[ev.room].type;
+	}
+	if (ev.type === 'action') e.what = String(ev.what ?? '').slice(0, 12);
+	hostObserve(e);
+}
+
+// ---- the DM
+async function loadBackend() {
+	if (TEST) return scripted;
 	try {
-		await buildFloor(1);
+		const got = await Promise.race([import('./dm/backends/pick.js').then((m) => m.pickBackend()), new Promise((_, no) => setTimeout(no, 4000))]);
+		return got || scripted;
+	} catch {
+		return scripted;
+	}
+}
+const proxy = {
+	get name() {
+		return backend.name;
+	},
+	ready: () => backend.ready(),
+	generate: (r, o) => backend.generate(r, o),
+	warm: (...a) => backend.warm?.(...a),
+};
+function makeDM(story = '') {
+	dm?.stop();
+	backend = scripted;
+	dm = createDM({
+		backend: proxy,
+		fallback: scripted,
+		quests,
+		story,
+		onProgram(cmds, meta) {
+			if (meta.kind !== 'react' || !world) return;
+			seqN++;
+			runProgram(cmds, world, { actor: meta.actor });
+			if (net()) session.send('prog', { seq: seqN, kind: 'react', cmds, actor: meta.actor });
+			if (TEST && !reactLogged) {
+				reactLogged = true;
+				console.log('pass dm-react');
+			}
+		},
+	});
+	return dm;
+}
+async function upgradeBackend() {
+	const b = await loadBackend();
+	backend = b;
+	for (const k of ['plan', 'populate', 'react']) {
+		try {
+			b.warm?.(k, systemFor(k), programSchema(k, 22))?.catch?.(() => {});
+		} catch {}
+	}
+}
+
+// Host: plan -> build -> populate; clients are handed the same floor through shared state.
+async function startHostFloor(n, fresh = false) {
+	floorLive = false;
+	const first = !dm || fresh;
+	if (first) makeDM(session?.shared?.story ?? '');
+	quests.load([]);
+	popCmds = null;
+	const seed = (BASE_SEED + n * 7919) >>> 0;
+	const party = partyList();
+	const planCmds = await dm.plan({ floor: n, seed, party, story: dm.story });
+	const floorCmd = planCmds.find((c) => c.op === 'floor') ?? { op: 'floor', palette: 'verdant' };
+	floorCmdNow = floorCmd;
+	floorSeed = seed;
+	R.floor = n;
+	builtKey = `${n}:${seed}`;
+	if (net()) publishShared(true);
+	await buildFloor(n, { seed, floorCmd });
+	runProgram(planCmds, world);
+	const rooms = dungeon.rooms.map((r) => ({ id: r.id, type: r.type, w: r.w, h: r.h, depth: r.depth }));
+	popCmds = await dm.populate({ rooms, locked: [dungeon.entrance, dungeon.boss], party: partyList() });
+	runProgram(popCmds, world);
+	refreshQuests();
+	if (first) upgradeBackend();
+	floorLive = true;
+	if (TEST && !genesisLogged) {
+		genesisLogged = true;
+		console.log('pass dm-genesis');
+	}
+	if (net()) publishShared(true);
+	last = performance.now();
+}
+
+function sharedState() {
+	return {
+		seed: floorSeed,
+		floor: R.floor,
+		floorCmd: floorCmdNow,
+		populate: popCmds,
+		world: world?.snapshot(),
+		quests: quests.toJSON(),
+		seq: seqN,
+		story: dm?.story ?? lastShared?.story ?? '',
+		cleared: [...R.cleared],
+		rift: rift ? { x: rift.x, z: rift.z } : null,
+	};
+}
+function publishShared(force = false) {
+	if (!net() || !isHost()) return;
+	const t = performance.now();
+	if (!force && t - sharedAt < 2000) return;
+	sharedAt = t;
+	let st = sharedState();
+	try {
+		session.setShared(st);
+	} catch {
+		st = { ...st, populate: null };
+		try {
+			session.setShared(st);
+		} catch {}
+	}
+	lastShared = st;
+}
+
+// ---- clients
+async function clientSync() {
+	const sh = lastShared;
+	if (!sh || sh.seed == null || isHost()) return;
+	const key = `${sh.floor}:${sh.seed}`;
+	if (building) return;
+	if (key !== builtKey) {
+		building = true;
+		floorLive = false;
+		try {
+			R.floor = sh.floor;
+			await buildFloor(sh.floor, { seed: sh.seed, floorCmd: sh.floorCmd });
+			builtKey = key;
+			appliedKey = '';
+			descending = false;
+		} catch (e) {
+			console.error(e);
+		}
+		building = false;
+		if (mode === 'loading') mode = 'play';
+		last = performance.now();
+		lockPointer();
+		return clientSync();
+	}
+	if (sh.populate && appliedKey !== key && world) {
+		appliedKey = key;
+		world.restore(sh.world);
+		quests.load(sh.quests);
+		renderQuests(compactQuests());
+		R.cleared = new Set(sh.cleared ?? []);
+		floorLive = true;
+	}
+	if (sh.rift && !rift && enemies && floorLive) openRift(sh.rift.x, sh.rift.z);
+}
+
+function applyBless(what, n) {
+	const amt = Math.max(1, Math.min(100, +n || 0));
+	if (what === 'heal') heal(amt);
+	else if (what === 'mana') R.mana = Math.min(R.maxMana, R.mana + amt);
+	else if (what === 'potion') R.potions = Math.min(5, R.potions + Math.max(1, Math.round(amt / 25)));
+	else if (what === 'xp') gainXp(amt);
+	else if (what === 'haste' || what === 'ward') world.timers[what] = Math.max(world.timers[what], Math.max(6, Math.min(30, amt * 0.3)));
+	audio.cue?.('levelUp', { vol: 0.5 });
+}
+// world.bless/curse on the host: a remote actor gets it over the wire; 'all' goes to every remote and the host applies its own.
+function relay(kind, p) {
+	if (!net()) return false;
+	const to = p.who === 'actor' && p.actorId && p.actorId !== myId() && session.players.some((x) => x.id === p.actorId) ? p.actorId : null;
+	const msg = { k: kind, what: p.what, n: kind === 'bless' ? p.amount : p.secs };
+	if (to) {
+		session.send('fx', msg, { to });
+		return true;
+	}
+	if (p.who === 'all') session.send('fx', msg);
+	return false;
+}
+
+function onFx(m) {
+	if (!m || typeof m.k !== 'string' || isHost()) return;
+	if (m.k === 'bless') applyBless(m.what, m.n);
+	else if (m.k === 'curse') {
+		if (world && m.what in world.timers) world.timers[m.what] = Math.max(world.timers[m.what], Math.min(60, +m.n || 0));
+	} else if (m.k === 'rift') {
+		if (!rift && enemies) openRift(m.x, m.z);
+	} else if (m.k === 'clear') {
+		heal(8);
+		gainXp(10);
+	} else if (m.k === 'xp') gainXp(+m.n || 0);
+	else if (m.k === 'roar') {
+		audio.roar();
+		addShake(0.6);
+	} else if (m.k === 'quests') renderQuests(m.q || []);
+}
+
+const selfState = () => ({ x: walker.x, z: walker.z, y: playerFloor() * CELL_M, yaw: walker.yaw, pitch: walker.pitch, anim: R.down ? 'die' : weapon.swinging ? 'attack' : walker.speedNow > 0.5 ? 'walk' : 'idle', hp: Math.max(0, Math.round(R.hp)) });
+const faced = (s) => ({ ...s, yaw: s.yaw + Math.PI }); // avatars face +z at yaw 0; walkers and bots look down -z
+
+function onMsg(type, m, from) {
+	if (!dungeon) return;
+	if (type === 'p') {
+		remote.set(from, { ...m, t: performance.now() });
+		if (isHost() && avatars) avatars.upsert(from, faced(m), { name: nameOf(from) });
+	} else if (type === 'h') {
+		if (!isHost()) onHostTick(m);
+	} else if (type === 'hit') {
+		if (isHost() && floorLive) hostHit(from, m);
+	} else if (type === 'ev') {
+		if (isHost()) hostEvent(from, m.event);
+	} else if (type === 'prog') {
+		if (!isHost() && world) runProgram(m.cmds, world, { actor: m.actor });
+	} else if (type === 'dmg') {
+		if (m.to === myId() && mode === 'play') hitPlayer(null, m.dmg, m.kind);
+	} else if (type === 'fx') onFx(m);
+}
+
+function hostHit(from, m) {
+	const e = enemies.list.find((x) => x.id === m.eid);
+	if (!e || e.dead || !(m.dmg > 0)) return;
+	const s = remote.get(from);
+	let kx = 0;
+	let kz = 0;
+	if (s) {
+		const dx = e.x - s.x;
+		const dz = e.z - s.z;
+		const l = Math.hypot(dx, dz) || 1;
+		const k = m.crit ? 9 : 4.5;
+		kx = (dx / l) * k;
+		kz = (dz / l) * k;
+	}
+	const res = enemies.damageById(m.eid, Math.min(300, m.dmg), { kx, kz, fire: m.kind === 'fire' });
+	if (res?.killed) onKill(e, from);
+}
+
+function onHostTick(m) {
+	if (!enemies || !avatars || mode === 'loading' || mode === 'descend' || building) return;
+	enemies.applySnapshot(m.e.map((e) => [e.id, Math.max(0, ENEMIES.indexOf(e.type)), e.x, e.z, e.yaw, e.hp, e.wa ?? 0]));
+	const seen = new Set();
+	for (const p of m.p) {
+		if (p.id === myId()) continue;
+		seen.add(p.id);
+		avatars.upsert(p.id, faced(p), { name: nameOf(p.id) });
+		remote.set(p.id, { ...p, t: performance.now() });
+	}
+	for (const b of m.b) {
+		seen.add(b.id);
+		avatars.upsert(b.id, faced({ ...b, anim: b.down ? 'die' : b.anim }), { name: nameOf(b.id), bot: true });
+		remote.set(b.id, { ...b, t: performance.now() });
+	}
+	for (const id of shown) if (!seen.has(id)) {
+		avatars.remove(id);
+		remote.delete(id);
+	}
+	shown.clear();
+	for (const id of seen) shown.add(id);
+}
+
+function sendHostTick() {
+	const p = [{ id: myId(), ...selfState() }];
+	for (const [id, st] of remote) p.push({ id, x: st.x, z: st.z, y: st.y, yaw: st.yaw, pitch: st.pitch, anim: st.anim, hp: st.hp });
+	const e = enemies.snapshot().map((r) => ({ id: r[0], type: ENEMIES[r[1]] || 'hollow', x: r[2], z: r[3], yaw: r[4], hp: r[5], wa: r[6] }));
+	const b = companions.list.map((t) => ({ id: t.id, x: t.x, z: t.z, y: t.y, yaw: t.yaw, pitch: 0, anim: BOT_ANIM[t.anim] || 'idle', hp: Math.round(t.hp), down: t.state === 'down' }));
+	session.send('h', { t: Math.round(session.now()), p, e, b });
+}
+
+// ---- enemies, bots, targets
+function buildTargets() {
+	tgtList.length = 0;
+	tgtList.push({ id: 'me', x: walker.x, z: walker.z, alive: !R.down && R.hp > 0 });
+	const now = performance.now();
+	for (const [id, st] of remote) {
+		if (now - st.t > 6000 || id.startsWith('bot:')) continue;
+		tgtList.push({ id, x: st.x, z: st.z, alive: st.hp > 0 });
+	}
+	for (const t of companions.targets()) tgtList.push(t);
+}
+const humansArr = [];
+function stepEnemies(dt) {
+	if (!enemies) return;
+	if (!isHost()) return enemies.update(dt);
+	buildTargets();
+	enemies.setTargets(tgtList);
+	enemies.update(dt * (world?.mods.enemySpeed ?? 1), hooks);
+	humansArr.length = 0;
+	for (const t of tgtList) if (!String(t.id).startsWith('bot:')) humansArr.push(t);
+	companions.update(dt, humansArr);
+	for (const e of enemies.list) if (e.dead && !e._k) onKill(e, 'bot');
+}
+
+// Everything that runs each frame, in play or under a menu: the world, the host's sim, the wire.
+function simStep(dt) {
+	world?.update(dt);
+	stepEnemies(dt);
+	avatars?.update(dt);
+	if (floorLive) trackRoom();
+	updateRooms(dt);
+	if (isHost()) {
+		dm?.tick(dt);
+		quests.tick(dt);
+		const want = Math.max(0, quests.partyWanted() - humanCount());
+		if (companions.list.length !== want) companions.setCount(want, { x: walker.x, z: walker.z });
+		botAcc += dt;
+		if (botAcc > 0.05) {
+			botAcc = 0;
+			for (const b of companions.states()) avatars.upsert(b.id, faced({ ...b, anim: BOT_ANIM[b.anim] || 'idle' }), { name: b.name, bot: true });
+		}
+		if (net() && floorLive) {
+			hAcc += dt;
+			if (hAcc >= 0.1) {
+				hAcc = 0;
+				sendHostTick();
+			}
+			publishShared();
+		}
+	} else if (net()) {
+		pAcc += dt;
+		if (pAcc >= 1 / 12 && floorLive) {
+			pAcc = 0;
+			session.send('p', selfState());
+		}
+	}
+	if (R.hp / R.maxHp < 0.25 && !R.down && performance.now() - lowHpAt > 20000) {
+		lowHpAt = performance.now();
+		emit({ type: 'low_hp' });
+	}
+	uiAcc += dt;
+	if (uiAcc > 0.25) {
+		uiAcc = 0;
+		renderParty();
+		if (isHost() && quests.list().some((q) => q.goal === 'survive' && !q.done)) renderQuests(compactQuests());
+		for (const [id, st] of remote) if (performance.now() - st.t > 8000 && !id.startsWith('bot:')) {
+			remote.delete(id);
+			avatars?.remove(id);
+		}
+	}
+}
+
+// ---- downed (multiplayer): out for a while, then back at half health
+function goDown() {
+	R.down = true;
+	R.downT = 12;
+	R.hp = 0;
+	banner('FALLEN', 3);
+	flash(1, 0.1, 0.05, 0.4);
+	emit({ type: 'down' });
+}
+function downTick(dt) {
+	R.downT -= dt;
+	walker.pitch += (0.9 - walker.pitch) * Math.min(1, dt * 3);
+	if (R.downT <= 0) {
+		R.down = false;
+		R.hp = R.maxHp * 0.5;
+		R.iframes = 2;
+		banner('RISE', 1.2);
+	}
+}
+
+// ---- sessions
+async function openSession(kind, code) {
+	if (kind === 'solo' || TEST) return createSession({ env: { location: { search: '' } } });
+	if (window.patch?.rooms) return createSession({ max: 12, quick: kind === 'quick', code: kind === 'join' ? code : undefined });
+	const u = new URL(location.href);
+	const room = kind === 'join' ? (/^local/.test(code) ? code : `local-${code}`) : u.searchParams.get('room') || `local-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+	u.searchParams.set('room', room);
+	history.replaceState(null, '', u);
+	return createSession({ max: 12 });
+}
+
+function wire(sn) {
+	sn.on('msg', onMsg);
+	sn.on('shared', (sh) => {
+		lastShared = sh;
+		if (sn === session && !isHost()) clientSync();
+	});
+	sn.on('join', (p) => {
+		if (!isHost()) return;
+		dm?.observe({ type: 'join', who: p.id });
+		if (floorLive) publishShared(true);
+	});
+	sn.on('leave', (p) => {
+		remote.delete(p.id);
+		avatars?.remove(p.id);
+		shown.delete(p.id);
+		if (isHost()) dm?.observe({ type: 'leave', who: p.id });
+	});
+	sn.on('host', () => reconcileHost());
+	sn.on('close', async () => {
+		banner('DISCONNECTED', 2.5);
+		session = await createSession({ env: { location: { search: '' } } });
+		wire(session);
+		reconcileHost();
+	});
+}
+// Whoever the session now calls host runs the DM, the enemies and the bots.
+function reconcileHost() {
+	const host = isHost();
+	if (host === wasHost) return;
+	wasHost = host;
+	if (!enemies) return;
+	if (host) {
+		enemies.puppet = false;
+		avatars?.clear();
+		shown.clear();
+		const sh = lastShared;
+		if (sh) {
+			quests.load(sh.quests ?? quests.toJSON());
+			for (const e of enemies.list) if (e.roomId >= 0 && !e.dead) R.active.add(e.roomId);
+		}
+		makeDM(sh?.story ?? '');
+		(async () => {
+			// adopt the floor: scripted plan/populate fill the DM's context (their programs are dropped), then the real backend takes over
+			const rooms = dungeon.rooms.map((r) => ({ id: r.id, type: r.type, w: r.w, h: r.h, depth: r.depth }));
+			await dm.plan({ floor: R.floor, seed: floorSeed || sh?.seed || 1, party: partyList() });
+			await dm.populate({ rooms, locked: [dungeon.entrance, dungeon.boss], party: partyList() });
+			quests.load(sh?.quests ?? compactQuests().map((q) => ({ ...q, goal: 'boss' })));
+			floorLive = true;
+			upgradeBackend();
+			publishShared(true);
+		})();
+	} else {
+		enemies.puppet = true;
+		dm?.stop();
+		dm = null;
+	}
+}
+
+async function beginRun(kind, code) {
+	if (running) return;
+	running = true;
+	audio.resume();
+	$('lobbyErr').textContent = '';
+	let sn;
+	try {
+		sn = await openSession(kind, code);
+	} catch (e) {
+		sn = null;
+	}
+	if (!sn || (kind === 'join' && sn.mode === 'solo')) {
+		$('lobbyErr').textContent = sn?.error ? String(sn.error).replace(/_/g, ' ') : 'Could not join';
+		running = false;
+		return;
+	}
+	session = sn;
+	wasHost = sn.isHost;
+	wire(sn);
+	$('title').classList.add('off');
+	$('cover').style.display = '';
+	$('cover').classList.remove('done');
+	newRun();
+	mode = 'loading';
+	try {
+		if (sn.isHost) {
+			await startHostFloor(1, true);
+		} else {
+			wasHost = false;
+			lastShared = sn.shared;
+			await new Promise((res) => {
+				const t = setInterval(() => {
+					if (lastShared?.seed != null) (clearInterval(t), res());
+				}, 120);
+			});
+			await clientSync();
+		}
 	} catch (e) {
 		console.error(e);
 		$('cover').innerHTML = `<div class="go">${e?.message ?? e}</div>`;
 		if (TEST) console.log(`fail level-loads: ${e?.message ?? e}`);
 		return;
 	}
-	if (TEST) {
-		$('title').classList.add('off');
-		mode = 'play';
-	} else {
+	mode = 'play';
+	$('hud').classList.remove('off');
+	last = performance.now();
+	lockPointer();
+}
+let running = false;
+
+$('bSolo').onclick = () => beginRun('solo');
+$('bHost').onclick = () => beginRun('host');
+$('bJoin').onclick = () => $('codeIn').value.trim() && beginRun('join', $('codeIn').value.trim());
+$('codeIn').addEventListener('keydown', (e) => e.key === 'Enter' && $('bJoin').click());
+if (window.patch?.rooms) $('bQuick').classList.remove('off');
+$('bQuick').onclick = () => beginRun('quick');
+
+// ---------------------------------------------------------------- go
+(async function boot() {
+	newRun();
+	try {
+		if (TEST) {
+			await beginRun('solo');
+		} else if (params.get('room')) {
+			await beginRun('join', params.get('room'));
+		} else {
+			const launch = await window.patch?.getLaunch?.().catch(() => null);
+			if (launch?.room) await beginRun('host');
+			else await buildFloor(1);
+		}
+	} catch (e) {
+		console.error(e);
+		$('cover').innerHTML = `<div class="go">${e?.message ?? e}</div>`;
+		if (TEST) console.log(`fail level-loads: ${e?.message ?? e}`);
+		return;
+	}
+	if (!running) {
 		mode = 'title';
 		$('title').classList.remove('off');
 		$('hud').classList.add('off');
@@ -1327,7 +2055,15 @@ function autopilot(dt) {
 			get mode() {
 				return mode;
 			},
-			start,
+			get session() { return session; },
+			get avatars() { return avatars; },
+			get world() { return world; },
+			get dm() { return dm; },
+			get companions() { return companions; },
+			quests,
+			remote,
+			emit,
+			descend,
 			// Runs n frames of 1/60 s at once, drawing only the last.
 			step(n = 60) {
 				skipRender = true;

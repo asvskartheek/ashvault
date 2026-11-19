@@ -198,7 +198,7 @@ async function localTransport(env, h, { max, code, opts }) {
 }
 
 // ---------- session ----------
-export async function createSession({ max = 12, quick = false, env = globalThis, local } = {}) {
+export async function createSession({ max = 12, quick = false, env = globalThis, local, code: joinCode } = {}) {
 	const ls = new Map();
 	const on = (ev, fn) => (ls.has(ev) ? ls.get(ev).add(fn) : ls.set(ev, new Set([fn])), api);
 	const off = (ev, fn) => (ls.get(ev)?.delete(fn), api);
@@ -408,7 +408,7 @@ export async function createSession({ max = 12, quick = false, env = globalThis,
 			mode = 'local';
 		} else if (env.patch?.rooms) {
 			const P = env.patch;
-			const launch = (await P.getLaunch?.().catch(() => null))?.room || null;
+			const launch = joinCode || (await P.getLaunch?.().catch(() => null))?.room || null;
 			const test = q.has('patch-test');
 			if (!(test && !launch)) {
 				tr = await patchTransport(P, handlers, { max, quick: quick && !launch, code: launch });

@@ -85,6 +85,28 @@ canvas{position:fixed;inset:0;width:100%;height:100%;display:block;outline:none}
 .card .nm{font:800 18px var(--display);letter-spacing:.08em}
 .card .ds{font:600 16px var(--label);color:var(--dim);letter-spacing:.03em}
 .card .k{margin-top:auto;font:700 13px var(--label);color:var(--gold);letter-spacing:.2em}
+
+/* DM: narration, quests, party, lobby */
+#say{position:absolute;left:50%;bottom:112px;transform:translateX(-50%);max-width:min(640px,56vw);text-align:center;opacity:0;transition:opacity .9s;font:italic 600 21px var(--display);letter-spacing:.03em;color:var(--bone);text-shadow:0 2px 14px #000,0 0 3px #000;line-height:1.35}
+#say.whisper{font:600 17px var(--label);letter-spacing:.22em;text-transform:uppercase;color:var(--soul)}
+#say.boss{font:900 26px var(--display);font-style:normal;letter-spacing:.1em;color:var(--blood)}
+#quests{position:absolute;top:18px;right:24px;display:flex;flex-direction:column;gap:5px;align-items:flex-end;max-width:min(300px,30vw)}
+#quests .q{font:700 14px var(--label);letter-spacing:.06em;color:var(--bone);text-shadow:0 1px 6px #000;padding:3px 9px;background:var(--plate);border-right:2px solid var(--gold)}
+#quests .q b{color:var(--gold);margin-left:8px;font-weight:800}
+#quests .q.done{opacity:.45;border-right-color:var(--soul)}
+#quests .q.done b{color:var(--soul)}
+#party{position:absolute;top:18px;left:24px;display:flex;flex-direction:column;gap:4px}
+#party .m{display:flex;align-items:center;gap:8px;font:700 13px var(--label);letter-spacing:.08em;color:var(--bone);text-shadow:0 1px 6px #000}
+#party .p{display:flex;gap:2px}
+#party .p i{width:9px;height:5px;background:rgba(255,255,255,.14)}
+#party .p i.on{background:var(--blood)}
+#party .m.down{opacity:.45}
+#code{font:700 13px var(--label);letter-spacing:.2em;color:var(--gold);cursor:pointer;pointer-events:auto;margin-bottom:4px}
+#lobby{display:flex;gap:12px;align-items:center;flex-wrap:wrap;justify-content:center}
+#lobby button,#lobby input{font:700 17px var(--label);letter-spacing:.22em;text-transform:uppercase;color:var(--gold);background:var(--plate);border:1px solid rgba(255,210,122,.4);padding:11px 22px;cursor:pointer;outline:none}
+#lobby button:hover,#lobby input:focus{border-color:var(--gold);background:rgba(40,30,16,.7)}
+#lobby input{width:130px;cursor:text;color:var(--bone);text-align:center}
+#lobbyErr{font:700 15px var(--label);letter-spacing:.14em;color:var(--blood);min-height:18px}
 </style>
 </head>
 <body>
@@ -96,6 +118,7 @@ canvas{position:fixed;inset:0;width:100%;height:100%;display:block;outline:none}
 		<div id="bossbar" class="off"><div id="bossName"></div><div class="bar"><b></b><i></i></div></div>
 		<div id="cross"></div>
 		<div id="banner"><div class="t"></div></div>
+		<div id="say"></div><div id="quests"></div><div id="party"></div>
 		<div id="d20"><svg viewBox="0 0 100 100"><polygon points="50,3 93,27 93,73 50,97 7,73 7,27" fill="#ffd27a" stroke="#6b4a14" stroke-width="3"/><polygon points="50,20 80,68 20,68" fill="none" stroke="#6b4a14" stroke-width="2.5"/><path d="M50 3 50 20M93 27 80 68M7 27 20 68M50 97 20 68M50 97 80 68M7 73 20 68M93 73 80 68M7 27 50 20M93 27 50 20" stroke="#6b4a14" stroke-width="2"/></svg><span></span></div>
 		<div id="hpTxt"></div>
 		<div id="vitals">
@@ -118,7 +141,8 @@ canvas{position:fixed;inset:0;width:100%;height:100%;display:block;outline:none}
 			<span><b>WASD</b>Move</span><span><b>LMB</b>Sword</span><span><b>RMB</b>Fire bolt</span><span><b>Space</b>Dodge</span>
 			<span><b>Shift</b>Sprint</span><span><b>Q</b>Shockwave</span><span><b>E</b>Potion</span><span><b>P</b>Pause</span>
 		</div>
-		<div class="go" id="goTxt">Click to descend</div>
+		<div id="lobby"><button id="bSolo">Solo</button><button id="bHost">Host</button><input id="codeIn" maxlength="24" placeholder="Code" autocomplete="off" spellcheck="false"><button id="bJoin">Join</button><button id="bQuick" class="off">Quick match</button></div>
+		<div id="lobbyErr"></div>
 	</div>
 	<div id="pause" class="screen off"><div class="mark" style="font-size:56px">PAUSED</div><div class="go">Click to resume</div></div>
 	<div id="dead" class="screen off">

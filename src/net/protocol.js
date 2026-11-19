@@ -58,7 +58,7 @@ const enc = {
 	h: (m) => ({
 		t: Math.round(num(m.t)),
 		p: (m.p || []).map((s) => [s.id, ...body(s)]),
-		e: (m.e || []).map((e) => [e.id, idx(ENEMIES, e.type), q(e.x, 100), q(e.z, 100), qa(e.yaw), Math.max(0, Math.round(num(e.hp))), idx(ANIMS, e.anim)]),
+		e: (m.e || []).map((e) => [e.id, idx(ENEMIES, e.type), q(e.x, 100), q(e.z, 100), qa(e.yaw), Math.max(0, Math.round(num(e.hp))), Number.isInteger(e.wa) ? e.wa : idx(ANIMS, e.anim)]),
 		b: (m.b || []).map((s) => [s.id, ...body(s), s.down ? 1 : 0]),
 	}),
 	prog: (m) => ({ seq: m.seq, kind: m.kind, cmds: m.cmds, actor: m.actor }),
@@ -76,7 +76,7 @@ const dec = {
 			? {
 					t: m.t,
 					p: m.p.map((r) => unbody(r.slice(1), { id: r[0] })),
-					e: (m.e || []).map((r) => ({ id: r[0], type: ENEMIES[r[1]] || ENEMIES[0], x: r[2] / 100, z: r[3] / 100, yaw: r[4] / 1000, hp: r[5], anim: ANIMS[r[6]] || 'idle' })),
+					e: (m.e || []).map((r) => ({ id: r[0], type: ENEMIES[r[1]] || ENEMIES[0], x: r[2] / 100, z: r[3] / 100, yaw: r[4] / 1000, hp: r[5], anim: ANIMS[r[6]] || 'idle', wa: r[6] })),
 					b: (m.b || []).map((r) => unbody(r.slice(1, 8), { id: r[0], down: !!r[8] })),
 				}
 			: null,

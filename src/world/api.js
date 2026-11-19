@@ -20,7 +20,7 @@ const MAX_LIGHTS = 8;
 const TIMER_NAMES = ['haste', 'ward', 'dark', 'poison', 'slow', 'frenzy'];
 
 export function createWorldAPI(deps) {
-	const { view, dungeon, enemies, fx, audio, hud, R, authority = false } = deps;
+	const { view, dungeon, enemies, fx, audio, hud, R } = deps;
 	const quests = deps.quests;
 	const lights = new Map(); // room -> { color, power, fade, follow, slot }
 	const sealed = new Set();
@@ -34,7 +34,7 @@ export function createWorldAPI(deps) {
 	const cur = { exposure: 1, fog: 1, grade: [1, 1, 1], fogRgb: [0, 0, 0], mix: 0 };
 	const room = (i) => dungeon?.rooms?.[i];
 	const locked = (r) => !r || r.type === 'entrance' || r.type === 'boss';
-	const hostOnly = (op) => HOST_ONLY.has(op) && !authority;
+	const hostOnly = (op) => HOST_ONLY.has(op) && !deps.authority; // read live: host migration flips it
 
 	function roomPos(r) {
 		return { x: (r.cx + 0.5 - dungeon.W / 2) * CELL_M, y: 2.1, z: (r.cy + 0.5 - dungeon.H / 2) * CELL_M };
@@ -126,7 +126,9 @@ export function createWorldAPI(deps) {
 			lights.delete(i);
 			if (p <= 0) return;
 			const pos = roomPos(r);
-			lights.set(i, { color, power: p, fade: old ? old.fade : 0, follow: { x: pos.x, y: pos.y, z: pos.z }, slot: null });
+			lights.set(i, { color, power: p, fade: old ? old.fade : 0, follow: Object.assign({ x: pos.x, y: pos.y, z: pos.z }, { position: null }), slot: null }); // fx copies follow.position
+			const L = lights.get(i);
+			L.follow.position = L.follow;
 			while (lights.size > MAX_LIGHTS) lights.delete(lights.keys().next().value);
 			claimSlots();
 		},
