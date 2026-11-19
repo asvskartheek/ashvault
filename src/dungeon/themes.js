@@ -128,3 +128,30 @@ export const THEMES = {
 
 // Tint of a room's floor by its role, from above. Also the colours of the map's legend.
 export const ROLE_TINT = { entrance: 0x3fd0bb, combat: 0x8f95a3, elite: 0x9b6cf0, treasure: 0xd9a441, shrine: 0x5a8fe8, boss: 0xd8433a };
+
+const mixHex = (a, b, t) => {
+	const ch = (c, sh) => (c >> sh) & 255;
+	const m = (sh) => Math.round(ch(a, sh) + (ch(b, sh) - ch(a, sh)) * t);
+	return (m(16) << 16) | (m(8) << 8) | m(0);
+};
+const LOOKS = {};
+// The theme a floor looks like. The generator's rules and the crypt's structure stay verdant's (vaults, shafts, light rig and its strengths);
+// a palette lays its colours over them: stone, fog, flame, torch and lamp tints, pools, particles. Verdant is today's look, unchanged.
+export function lookTheme(name = 'verdant') {
+	const P = THEMES[name];
+	if (!P || name === 'verdant') return THEMES.verdant;
+	if (LOOKS[name]) return LOOKS[name];
+	const V = THEMES.verdant;
+	const t = { ...V };
+	for (const k of ['label', 'accent', 'bg', 'fog', 'fogD', 'floor', 'corridor', 'wall', 'cap', 'pillar', 'debris', 'flame', 'flameCore', 'cloth', 'particles']) t[k] = P[k];
+	t.walkFog = mixHex(P.walkFog, 0x000000, 0.55);
+	t.hemi = [P.hemi[0], P.hemi[1], V.hemi[2]];
+	t.dir = [P.dir[0], V.dir[1]];
+	t.torchLight = [P.torchLight[0], V.torchLight[1], V.torchLight[2]];
+	t.candleLight = { ...V.candleLight, color: mixHex(P.flame, 0xffffff, 0.55) };
+	t.doorLight = { ...V.doorLight, color: mixHex(P.flame, 0xc4c8bc, 0.6) };
+	t.emberLight = { ...V.emberLight, color: P.flame };
+	t.coldFill = { ...V.coldFill, color: mixHex(P.hemi[0], 0xa0a8aa, 0.45) };
+	t.pools = P.pools ?? V.pools;
+	return (LOOKS[name] = t);
+}

@@ -4,7 +4,7 @@
 // and the light field are Patch's, for walking inside.
 import { floorAt } from './floors.js';
 import { FLOOR, POOL, WALL } from './generator.js';
-import { ROLE_TINT, THEMES } from './themes.js';
+import { ROLE_TINT, lookTheme } from './themes.js';
 
 // Cell ceiling heights, in cells (1.5 m each at human scale).
 export const CEIL_TOP = 5.4;
@@ -110,8 +110,8 @@ const CUT_RY = [0, 0, Math.PI / 2, Math.PI, -Math.PI / 2];
 // The light field: a top-down picture of every lamp's light that stops at walls, sampled by every material. All torches light
 // the level for the cost of two texture reads, nothing leaks through a wall, and it costs nothing on a slow GPU. RGB is light
 // (square-root encoded), A how open the floor is (ambient occlusion). A second picture holds the mean direction to the light.
-export function bakeField(d, theme) {
-	const TH = THEMES[theme];
+export function bakeField(d, palette) {
+	const TH = lookTheme(palette);
 	const { W, H, grid } = d;
 	const K = 3;
 	const fw = W * K;
@@ -258,8 +258,8 @@ export function bakeField(d, theme) {
 }
 
 export function buildLevel(d, opts = {}) {
-	const theme = d.params.theme;
-	const TH = THEMES[theme];
+	const palette = d.params.palette ?? 'verdant';
+	const TH = lookTheme(palette);
 	const { W, H, grid, roomId, corridor, doorway, rooms, lakeMask } = d;
 	d.cut = cutCorners(d);
 	const idx = (x, y) => y * W + x;
@@ -627,7 +627,7 @@ export function buildLevel(d, opts = {}) {
 		parts: { pos: partPos, seed: partSeed, kind: spec.kind, color: spec.color },
 		portal,
 		rune,
-		field: opts.noField ? null : bakeField(d, theme),
+		field: opts.noField ? null : bakeField(d, palette),
 	};
 }
 

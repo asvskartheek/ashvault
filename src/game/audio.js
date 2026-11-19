@@ -24,6 +24,21 @@ export function createAudio({ muted = false } = {}) {
 	let musicEl = null;
 	let on = !muted;
 	let combat = 0;
+	// The DM's music mood: the fight swell is multiplied by it, and the music runs through a filter it can close.
+	const MOODS = {
+		calm: { mul: 0.6, cutoff: 900 },
+		dread: { mul: 0.75, cutoff: 520, drone: true },
+		battle: { mul: 1, cutoff: 20000 },
+		boss: { mul: 1.1, cutoff: 20000, drum: true },
+		silence: { mul: 0, cutoff: 20000 },
+	};
+	let mood = { mul: 1, cutoff: 20000 };
+	let moodMul = 1;
+	let moodFilter = null;
+	let droneGain = null;
+	let droneOsc = [];
+	let drumTimer = 0;
+	let vm = 1; // volume multiplier for the cue being played
 
 	function init() {
 		if (ctx) return;
@@ -39,6 +54,10 @@ export function createAudio({ muted = false } = {}) {
 		musicGain = ctx.createGain();
 		musicGain.gain.value = 0;
 		musicGain.connect(master);
+		moodFilter = ctx.createBiquadFilter();
+		moodFilter.type = 'lowpass';
+		moodFilter.frequency.value = 20000;
+		moodFilter.connect(musicGain);
 		const len = ctx.sampleRate;
 		noise = ctx.createBuffer(1, len, ctx.sampleRate);
 		const ch = noise.getChannelData(0);
@@ -47,6 +66,7 @@ export function createAudio({ muted = false } = {}) {
 			fetch(`./assets/sound/${f}`).then((r) => r.arrayBuffer()).then((a) => ctx.decodeAudioData(a)).then((b) => (buffers[k] = b)).catch(() => {});
 		}
 		if (!muted) startMusic();
+		applyMood();
 	}
 
 	function startMusic() {
@@ -54,7 +74,7 @@ export function createAudio({ muted = false } = {}) {
 		musicEl = new Audio('./assets/sound/final_battle_of_the_dark_wizards.ogg');
 		musicEl.loop = true;
 		musicEl.crossOrigin = 'anonymous';
-		ctx.createMediaElementSource(musicEl).connect(musicGain);
+		ctx.createMediaElementSource(musicEl).connect(moodFilter);
 		musicEl.play().catch(() => {});
 	}
 
@@ -70,7 +90,7 @@ export function createAudio({ muted = false } = {}) {
 		s.buffer = buffers[name];
 		s.playbackRate.value = rate * (1 + (Math.random() * 2 - 1) * jitter);
 		const g = ctx.createGain();
-		g.gain.value = vol;
+		g.gain.value = vol * vm;
 		s.connect(g).connect(sfx);
 		s.start();
 	}
@@ -89,7 +109,7 @@ export function createAudio({ muted = false } = {}) {
 		f.frequency.exponentialRampToValueAtTime(Math.max(20, f1), t + dur);
 		const g = ctx.createGain();
 		g.gain.setValueAtTime(0.0001, t);
-		g.gain.exponentialRampToValueAtTime(vol, t + attack);
+		g.gain.exponentialRampToValueAtTime(Math.max(0.0002, vol * vm), t + attack);
 		g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
 		s.connect(f).connect(g).connect(sfx);
 		s.start(t, Math.random());
@@ -105,11 +125,37 @@ export function createAudio({ muted = false } = {}) {
 		o.frequency.exponentialRampToValueAtTime(Math.max(20, freq1), t + dur);
 		const g = ctx.createGain();
 		g.gain.setValueAtTime(0.0001, t);
-		g.gain.exponentialRampToValueAtTime(vol, t + 0.008);
+		g.gain.exponentialRampToValueAtTime(Math.max(0.0002, vol * vm), t + 0.008);
 		g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
 		o.connect(g).connect(sfx);
 		o.start(t);
 		o.stop(t + dur + 0.05);
+	}
+
+	function applyMood() {
+		if (!ctx) return;
+		moodFilter.frequency.setTargetAtTime(mood.cutoff, ctx.currentTime, 0.6);
+		clearInterval(drumTimer);
+		drumTimer = 0;
+		if (mood.drum) drumTimer = setInterval(() => on && tone({ freq: 62, freq1: 34, dur: 0.4, vol: 0.4 }), 520);
+		// A sub drone for dread: made once, faded in and out.
+		if (mood.drone && on && !droneGain) {
+			droneGain = ctx.createGain();
+			droneGain.gain.value = 0;
+			const lp = ctx.createBiquadFilter();
+			lp.type = 'lowpass';
+			lp.frequency.value = 160;
+			lp.connect(droneGain).connect(master);
+			droneOsc = [[41, 'sine'], [61.5, 'triangle']].map(([f, type]) => {
+				const o = ctx.createOscillator();
+				o.type = type;
+				o.frequency.value = f;
+				o.connect(lp);
+				o.start();
+				return o;
+			});
+		}
+		droneGain?.gain.setTargetAtTime(mood.drone ? 0.22 : 0, ctx.currentTime, 1.2);
 	}
 
 	const api = {
@@ -122,6 +168,7 @@ export function createAudio({ muted = false } = {}) {
 			if (!ctx) return on;
 			master.gain.setTargetAtTime(on ? 0.9 : 0, ctx.currentTime, 0.05);
 			if (on) {
+				applyMood();
 				startMusic();
 				musicEl?.play().catch(() => {});
 			}
@@ -130,7 +177,54 @@ export function createAudio({ muted = false } = {}) {
 		// 0 calm .. 1 full fight: the music swells with it.
 		setCombat(k, dt) {
 			combat += (k - combat) * Math.min(1, dt * (k > combat ? 2 : 0.35));
-			if (musicGain) musicGain.gain.value = 0.1 + combat * 0.32;
+			moodMul += (mood.mul - moodMul) * Math.min(1, dt * 1.5);
+			if (musicGain) musicGain.gain.value = (0.1 + combat * 0.32) * moodMul;
+		},
+		// The DM's music mood: calm, dread, battle, boss, silence. Anything else clears it.
+		music(track) {
+			mood = MOODS[track] ?? { mul: 1, cutoff: 20000 };
+			applyMood();
+		},
+		// A sound by the DM's name (schema.js SFX). Unknown names do nothing.
+		cue(name, { vol = 1 } = {}) {
+			if (!ctx || !on) return;
+			const at = (v, fn) => {
+				vm = v;
+				try {
+					fn();
+				} finally {
+					vm = 1;
+				}
+			};
+			const CUES = {
+				rise: () => api.rise(),
+				roar: () => api.roar(),
+				door: () => api.door(),
+				boneBreak: () => api.boneBreak(),
+				explode: () => api.explode(),
+				shockwave: () => api.shockwave(),
+				levelUp: () => api.levelUp(),
+				pickup: () => api.pickup(),
+				hurt: () => api.hurt(),
+				coins: () => play('coins', { vol: 0.8 }),
+				// A struck bell: a fundamental with inharmonic partials, ringing out.
+				bell: () => {
+					[[196, 3.2, 0.22], [196 * 2.4, 2.2, 0.1], [196 * 3.9, 1.5, 0.06], [196 * 5.4, 0.9, 0.04]].forEach(([f, dur, v]) => tone({ freq: f, freq1: f * 0.998, dur, vol: v }));
+					noiseHit({ dur: 0.08, f0: 4000, f1: 2500, q: 4, vol: 0.12, attack: 0.002 });
+				},
+				// Breath with a voice-like band that drifts: two airy passes.
+				whisper: () => {
+					noiseHit({ dur: 1.9, f0: 2600, f1: 4200, q: 7, vol: 0.14, attack: 0.7 });
+					setTimeout(() => ctx && at(vol, () => noiseHit({ dur: 1.6, f0: 3800, f1: 2200, q: 9, vol: 0.1, attack: 0.5 })), 450);
+				},
+				quake: () => {
+					noiseHit({ dur: 2.4, f0: 260, f1: 35, q: 0.5, vol: 0.8, type: 'lowpass', attack: 0.2 });
+					tone({ freq: 44, freq1: 24, dur: 2.2, vol: 0.6 });
+					for (let i = 0; i < 6; i++) setTimeout(() => ctx && at(vol, () => noiseHit({ dur: 0.18, f0: 600, f1: 120, q: 1, vol: 0.2, type: 'lowpass', attack: 0.01 })), 200 + i * 280 + Math.random() * 120);
+				},
+			};
+			const f = CUES[name];
+			if (f) at(vol, f);
 		},
 		swing(n = 0) {
 			noiseHit({ dur: 0.2, f0: 600 + n * 200, f1: 3800, q: 0.9, vol: 0.35 });
