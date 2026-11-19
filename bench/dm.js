@@ -12,7 +12,19 @@ const systemFor = (kind) => promptMod?.systemFor?.(kind) ?? `You are the Dungeon
 const rooms = Array.from({ length: 12 }, (_, id) => ({ id, type: id === 0 ? 'entrance' : id === 11 ? 'boss' : 'combat', w: 9, h: 9, depth: id }));
 const state = { floor: 2, seed: 7, party: [{ id: 'a', name: 'Mira' }], rooms, locked: [0, 11], quests: [], story: 'Mira entered the crypt.' };
 const events = [{ type: 'kill', enemy: 'hollow', room: 3, who: 'a' }, { type: 'low_hp', who: 'a' }];
-const promptFor = (kind) => promptMod?.promptFor?.(kind, state, events) ?? `Floor ${state.floor}, ${rooms.length} rooms (0..11). Party: Mira. Events: Mira killed a hollow in room 3. Mira is at low health. Write the program.`;
+const SCEN = [
+	[{ type: 'kill', enemy: 'hollow', room: 3, who: 'a' }, { type: 'low_hp', who: 'a' }],
+	[{ type: 'enter', room: 5, role: 'treasure', who: 'a' }],
+	[{ type: 'kill', enemy: 'ogre', room: 7, who: 'a' }, { type: 'kill', enemy: 'wisp', room: 7, who: 'a' }],
+	[{ type: 'lull', secs: 25 }],
+	[{ type: 'quest_progress', id: 'q1', k: 3, n: 5 }, { type: 'kill', enemy: 'revenant', room: 4, who: 'a' }],
+	[{ type: 'quest_done', id: 'q1' }],
+	[{ type: 'enter', room: 9, role: 'elite', who: 'a' }],
+	[{ type: 'low_hp', who: 'a' }, { type: 'kill', enemy: 'hollow', room: 2, who: 'a' }],
+	[{ type: 'action', what: 'opened a chest', who: 'a' }],
+	[{ type: 'kill', enemy: 'hollow', room: 1, who: 'a' }, { type: 'kill', enemy: 'hollow', room: 1, who: 'a' }, { type: 'kill', enemy: 'hollow', room: 1, who: 'a' }],
+];
+const promptFor = (kind, ev = events) => promptMod?.promptFor?.(kind, state, ev) ?? `Floor ${state.floor}, ${rooms.length} rooms (0..11). Party: Mira. Events: Mira killed a hollow in room 3. Mira is at low health. Write the program.`;
 
 const out = document.getElementById('out');
 const log = (s) => (out.textContent += '\n' + s);
@@ -50,15 +62,16 @@ async function run(backend) {
 	const t0 = performance.now();
 	try {
 		await backend.ready();
-		for (const k of ['react', 'populate']) await backend.warm(k, systemFor(k), programSchema(k, rooms.length));
+		for (const k of ['react', 'populate', 'plan']) await backend.warm(k, systemFor(k), programSchema(k, rooms.length));
 	} catch (e) {
 		row.error = String(e?.message ?? e);
 		return row;
 	}
 	row.warmMs = Math.round(performance.now() - t0);
-	for (const kind of ['react', 'react', 'react', 'react', 'react', 'populate']) {
+	const plan = [...SCEN.map((ev) => ['react', ev]), ['populate', events], ['populate', events], ['plan', events], ['plan', events]];
+	for (const [kind, ev] of plan) {
 		const schema = programSchema(kind, rooms.length);
-		const req = { kind, system: systemFor(kind), prompt: promptFor(kind), schema, maxTokens: { react: 128, populate: 320 }[kind], state, events };
+		const req = { kind, system: systemFor(kind), prompt: promptFor(kind, ev), schema, maxTokens: { plan: 96, react: 128, populate: 320 }[kind], state, events };
 		await new Promise((r) => setTimeout(r, 200));
 		maxGap = 0;
 		const t = performance.now();
@@ -71,7 +84,7 @@ async function run(backend) {
 		}
 		const ms = Math.round(performance.now() - t);
 		const cmds = validate(parseLoose(text), { kind, rooms: rooms.length, locked: new Set([0, 11]) });
-		row.runs.push({ kind, ms, valid: cmds.length, maxGapMs: Math.round(maxGap), err, sample: text.slice(0, 160) });
+		row.runs.push({ kind, ms, valid: cmds.length, maxGapMs: Math.round(maxGap), err, sample: text });
 	}
 	return row;
 }
@@ -89,7 +102,9 @@ for (const b of backends) {
 	else {
 		log(`warm ${row.warmMs} ms`);
 		for (const r of row.runs) log(`${r.kind.padEnd(8)} ${String(r.ms).padStart(6)} ms  valid ${r.valid}  maxFrameGap ${r.maxGapMs} ms${r.err ? '  ERR ' + r.err : ''}`);
-		log(`sample: ${row.runs[0].sample}`);
+		for (const r of row.runs) log(`${r.kind} ${r.sample}`);
+		const by = (k) => row.runs.filter((r) => r.kind === k);
+		log(`react >=1 valid: ${by('react').filter((r) => r.valid >= 1).length}/${by('react').length}  median ${by('react').map((r) => r.ms).sort((x, y) => x - y)[5]} ms`);
 	}
 	b.close?.();
 }

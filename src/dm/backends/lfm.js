@@ -1,4 +1,7 @@
 // Backend: Liquid LFM2.5-350M (q4f16 ONNX) in a module Worker on WebGPU. The model loads only when this backend is picked.
+// Room count the program may address: the state's rooms, else what the JSON schema allows.
+const roomsOf = (req) => req.state?.rooms?.length || (req.schema?.items?.anyOf?.map((a) => a.properties?.room?.maximum).find((m) => m !== undefined) ?? 21) + 1;
+
 export function createLfmBackend({ base: root } = {}) {
 	const base = () => new URL(root ?? './', document.baseURI).href; // folder that holds models/
 	let worker = null;
@@ -47,7 +50,7 @@ export function createLfmBackend({ base: root } = {}) {
 			const onAbort = () => worker?.postMessage({ type: 'abort', id });
 			signal?.addEventListener('abort', onAbort, { once: true });
 			try {
-				const text = await call(id, { type: 'gen', id, base: base(), system: req.system, prompt: req.prompt, maxTokens: req.maxTokens ?? 128 });
+				const text = await call(id, { type: 'gen', id, base: base(), system: req.system, prompt: req.prompt, maxTokens: req.maxTokens ?? 128, kind: req.kind ?? 'react', rooms: roomsOf(req), locked: [...(req.state?.locked ?? [])] });
 				if (text === null) throw new DOMException('aborted', 'AbortError');
 				return text;
 			} finally {

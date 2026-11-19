@@ -1,5 +1,7 @@
 // Liquid LFM2.5-350M on WebGPU, off the main thread. Weights and ONNX Runtime wasm are served from our own origin (Patch CSP: connect-src 'self').
-import { env, AutoTokenizer, AutoModelForCausalLM, StoppingCriteria, StoppingCriteriaList } from '@huggingface/transformers';
+import { env, AutoTokenizer, AutoModelForCausalLM, StoppingCriteria, StoppingCriteriaList, LogitsProcessor } from '@huggingface/transformers';
+import { shotsFor } from '../prompt.js';
+import { buildVocab, grammarFor, tokenStrings, applyMask } from '../grammar.js';
 import wasmUrl from '../../../node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.asyncify.wasm?url';
 import mjsUrl from '../../../node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.asyncify.mjs?url';
 
@@ -13,6 +15,7 @@ env.backends.onnx.wasm.numThreads = 1;
 let tok = null;
 let model = null;
 let dtype = null;
+let vocab = null;
 let loading = null;
 const aborted = new Set();
 
@@ -36,57 +39,74 @@ async function load(base) {
 	const progress_callback = (p) => p.status === 'progress_total' && post({ type: 'progress', loaded: p.loaded, total: p.total });
 	tok = await AutoTokenizer.from_pretrained(MODEL, { progress_callback });
 	model = await AutoModelForCausalLM.from_pretrained(MODEL, { device: 'webgpu', dtype, progress_callback });
+	vocab = buildVocab(tokenStrings(tok, 64400));
 	// compile shaders now, not on the first real request
 	const warm = tok('warm', { add_special_tokens: false });
 	await model.generate({ ...warm, max_new_tokens: 2, do_sample: false });
 }
 
-// Stops when the first top-level JSON array closes, or when aborted.
-class StopAtClose extends StoppingCriteria {
-	constructor(id, promptLen) {
-		super();
+// Grammar-constrained greedy decoding: only tokens that keep the output a program schema.validate() accepts stay finite.
+// One shared runner follows the generated ids; the processor masks logits, the criteria stops when the program closes (or on abort).
+class Walk {
+	constructor(id, promptLen, g) {
 		this.id = id;
 		this.promptLen = promptLen;
-		this.depth = 1; // the prompt ends with the opening '['
-		this.inStr = false;
-		this.esc = false;
+		this.r = g.runner();
 		this.seen = 0;
 	}
-	_call(input_ids) {
-		const row = input_ids[0];
-		const out = [false];
-		if (aborted.has(this.id)) return (out[0] = true), out;
+	sync(row) {
 		const total = Number(row.length ?? row.dims?.[0] ?? 0);
-		if (total <= this.promptLen + this.seen) return out;
-		const ids = Array.from(row, Number).slice(this.promptLen + this.seen);
-		this.seen += ids.length;
-		for (const ch of tok.decode(ids, { skip_special_tokens: true })) {
-			if (this.inStr) {
-				if (this.esc) this.esc = false;
-				else if (ch === '\\') this.esc = true;
-				else if (ch === '"') this.inStr = false;
-			} else if (ch === '"') this.inStr = true;
-			else if (ch === '[') this.depth++;
-			else if (ch === ']' && --this.depth === 0) out[0] = true;
-		}
-		return out;
+		while (this.promptLen + this.seen < total) this.r.advance(Number(row[this.promptLen + this.seen++]));
+	}
+}
+class GrammarMask extends LogitsProcessor {
+	constructor(w) {
+		super();
+		this.w = w;
+	}
+	_call(input_ids, logits) {
+		this.w.sync(input_ids[0]);
+		const parts = this.w.r.mask();
+		if (parts.length) applyMask(logits.data, parts);
+		return logits;
+	}
+}
+class StopWhenDone extends StoppingCriteria {
+	constructor(w) {
+		super();
+		this.w = w;
+	}
+	_call(input_ids) {
+		this.w.sync(input_ids[0]);
+		return [aborted.has(this.w.id) || this.w.r.done];
 	}
 }
 
-async function gen({ id, system, prompt, maxTokens }) {
+async function gen({ id, system, prompt, maxTokens, kind, rooms, locked }) {
 	const messages = [
 		{ role: 'system', content: system },
+		...shotsFor(kind).flatMap(([u, a]) => [
+			{ role: 'user', content: u },
+			{ role: 'assistant', content: a },
+		]),
 		{ role: 'user', content: prompt },
 	];
 	const text = tok.apply_chat_template(messages, { tokenize: false, add_generation_prompt: true }) + '[';
 	const inputs = tok(text, { add_special_tokens: false });
 	const promptLen = inputs.input_ids.dims[1];
+	const w = new Walk(id, promptLen, grammarFor(vocab, { kind, rooms, locked }));
 	const crit = new StoppingCriteriaList();
-	crit.push(new StopAtClose(id, promptLen));
-	const out = await model.generate({ ...inputs, max_new_tokens: maxTokens, do_sample: false, repetition_penalty: 1.05, stopping_criteria: crit });
+	crit.push(new StopWhenDone(w));
+	const out = await model.generate({
+		...inputs,
+		max_new_tokens: maxTokens,
+		do_sample: false,
+		logits_processor: [new GrammarMask(w)],
+		stopping_criteria: crit,
+	});
 	if (aborted.has(id)) return null;
 	const all = Array.from(out.tolist()[0], Number).slice(promptLen);
-	return '[' + tok.decode(all, { skip_special_tokens: true });
+	return '[' + tok.decode(all, { skip_special_tokens: true, clean_up_tokenization_spaces: false });
 }
 
 self.onmessage = async ({ data: m }) => {
