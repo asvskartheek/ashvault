@@ -25,74 +25,86 @@ Every module below is owned by one agent. Agents touch only their files. Shared 
 | E · world | `src/world/api.js`, `src/game/audio.js` (new cues + music moods) | `createWorldAPI(deps)` |
 | integration | `src/main.js`, `index.html` | wiring, lobby, HUD |
 
-## Interfaces
+## Interfaces (revised after Fable's review)
+
+### Palettes, not layout themes
+Only the generator's crypt rules build the vaulted crypt. The floor is always generated with theme `verdant`; the DM's `floor.palette` (one of the 5 `THEMES` looks) is laid over it: torch colour, fog, hemi/dir light, particles, pool colours. E owns making this work (pass `params.palette` through the build worker into `bakeField` / `level.js` colour lookups, keep the generator's rules `verdant`).
+
+### Program kinds (`schema.js` `KINDS`)
+| kind | when | ops | max |
+|---|---|---|---|
+| `plan` | floor start, before building | floor, say, music, mood | 4 |
+| `populate` | floor built | role, guard, quest, light, seal, say, music, mood | 12 (overrides only; generator defaults stand) |
+| `react` | after events | spawn, light, mood, sfx, music, bless, curse, say, quest | 4 |
+
+`validate(program, { kind, rooms, locked })`. `locked` = entrance + boss room ids. `programSchema(kind, rooms)` for constrained decoding. `NEED`, `GOAL_NEED`, `HOST_ONLY`, `COLORS` (named colours → hex) exported. Zero valid cmds from an LLM → use the scripted backend's program instead.
 
 ### Backend (A writes scripted, B writes the LLM ones)
-
 ```js
 backend = {
   name: 'prompt-api' | 'lfm' | 'scripted',
-  async ready(),                    // true when it can generate now
-  async generate(req, { signal }),  // → string (JSON text of a program)
+  async ready(),                         // can generate now
+  async warm(kind, system, schema),      // optional: build/keep a session whose prefix is the static system prompt for this kind
+  async generate(req, { signal }),       // → string (JSON text of a program)
 }
-req = { kind: 'genesis' | 'react', system, prompt, schema, maxTokens, state, events }
-// LLM backends use system/prompt/schema. scripted uses state/events (structured) and ignores the text.
+req = { kind, system, prompt, schema, maxTokens, state, events }
+// system is STATIC per kind (prefix reuse). LLM backends use system/prompt/schema; scripted uses state/events and ignores text.
 ```
+`pick.js` → `async pickBackend() → backend`: prompt-api if `LanguageModel.availability()==='available'`; else lfm if `navigator.gpu` and HEAD `./models/lfm2.5-350m/onnx/model_q4f16.onnx_data` ok; else scripted. `?dm=scripted|prompt|lfm` forces one. Patch test → scripted.
 
-`pick.js` → `async pickBackend({ allowLLM }) → backend` (prompt-api if `availability()==='available'`, else lfm if `navigator.gpu` and model files present via HEAD `./models/lfm2.5-350m/onnx/model_q4f16.onnx`, else scripted). `?dm=scripted|prompt|lfm` forces one.
-
-### DM agent (A)
-
+### DM agent (A) — host only
 ```js
-const dm = createDM({ backend, fallback /* scripted backend */, onProgram(cmds, meta) });
-await dm.genesis({ floor, seed, party: [{id,name,bot}], rooms: [{id,type,w,h}], story }) // → validated cmds incl. one `floor` op, roles, guards, ≥1 quest, music, say. ≤ 6 s, else fallback.
-dm.observe(event)        // events below; dm decides when to react (debounce ~1.5 s, priority events react sooner)
-dm.tick(dt)              // emits 'lull' itself after ~20 s of no events
-dm.story                 // ≤ 600 char running summary, carried across floors
+const dm = createDM({ backend, fallback, onProgram(cmds, meta) });   // meta = { seq, kind, backend, ms, actor }
+const planCmds = await dm.plan({ floor, seed, party: [{id,name,bot}], story });     // ≤ 4 s else fallback; always contains one `floor` cmd
+// main builds the floor from the floor cmd, then:
+const popCmds = await dm.populate({ rooms: [{id,type,w,h,depth}], locked, party });  // ≤ 6 s else fallback; ≥ 1 quest
+dm.observe(event)   // react: debounce ~1.5 s, priority events (down, boss_dead, quest_done, join) sooner; one generation in flight
+dm.tick(dt)         // emits 'lull' itself after ~20 s quiet
+dm.story            // ≤ 600 chars, written by CODE from events + quests (not by the model); carried across floors
 dm.stop()
 ```
+Events (`who` = player id; names resolved by prompt.js from party): `enter{room,role,who}`, `kill{enemy,room,who}`, `room_clear{room}`, `down{who}`, `low_hp{who}`, `quest_progress{id,k,n}`, `quest_done{id}`, `boss_dead`, `shrine{who}`, `treasure{who}`, `lull{secs}`, `join{who}`, `leave{who}`, `action{who,what}`.
 
-Events: `{t:'enter', room, role, who}`, `{t:'kill', enemy, room, who}`, `{t:'room_clear', room}`, `{t:'down', who}`, `{t:'low_hp', who}`, `{t:'quest_progress', id, k, n}`, `{t:'quest_done', id}`, `{t:'boss_dead'}`, `{t:'shrine', who}`, `{t:'treasure', who}`, `{t:'lull', secs}`, `{t:'join', who}`, `{t:'leave', who}`, `{t:'action', who, what}` (dodge spam, potion, shockwave, etc.). `who` is a player name.
-
-Prompts: system prompt lists the ops compactly with enums + 2 few-shot programs; prompt = floor facts, party, quest state, last ≤ 8 events, story. Ask for "a JSON array only".
+`prompt.js`: `systemFor(kind)` static (op list with enums + 1 short few-shot per kind, ≤ 700 tokens), `promptFor(kind, state, events)` (≤ 300 tokens: floor facts, party, quests, last ≤ 6 events, story). Max output: plan 96, populate 320, react 128 tokens.
 
 ### Interpreter (A)
+`run(cmds, world, { actor })` → one World API call per op (method name = op). `floor` is not run: `plan` returns it and main builds with it. `quest` → `world.quest(q)`; quests.js owns progress and pays `reward`.
 
-`run(cmds, world, { actor })` calls the World API, one method per op (names = op names). `floor` op is not run by the interpreter: `genesis` returns it and main builds the floor with it.
-
-`quests.js`: `createQuests({ onEvent })` → `{ add(q), complete(id), observe(event), list(), toJSON(), load(json) }`. Tracks `kill` (enemy type count), `reach` (enter room), `cleanse` (room_clear), `survive` (secs), `boss` (boss_dead). Emits `quest_progress` / `quest_done` events back into the DM.
+`quests.js` (host): `createQuests({ onEvent, pay(reward) })` → `{ add(q), observe(event), list(), toJSON(), load(json), partyWanted() }`. Goals: kill (enemy type count n), reach (enter room), cleanse (room_clear room), survive (n secs, host clock), boss (boss_dead). Emits `quest_progress` / `quest_done` back to the DM. `partyWanted()` = max `party` of open quests → host sets companion count = max(0, wanted − humans).
 
 ### World API (E)
-
 ```js
-const world = createWorldAPI({ view, dungeon, enemies, fx, audio, hud, party, R, spawnAt, roomCells });
-world.role(room, as) · guard(room, enemy, n, level) · spawn(enemy, n, {near, room, level}) · light(room, color, power)
-world.fog(color, density) · mood(as) · sfx(cue, room) · music(track) · shake(power)
-world.bless(what, amount, who, actorId) · curse(what, secs, who, actorId) · seal(room, open)
-world.say(text, voice) · quest(q) · complete(id, reward) · companions(n)
-world.update(dt)   // fades lights/fog/curses over time
+const world = createWorldAPI({ view, dungeon, enemies, fx, audio, hud, R, authority /* bool: host? */, spawnAt, roomCells, partyPos });
+// effect ops (everyone): light, mood, sfx, music, say
+// HOST_ONLY ops (no-op when !authority): role, guard, spawn, bless, curse, seal, quest
+world.role(room, as)                // writes dungeon.rooms[room].type
+world.guard(room, enemy, n, level)  // writes dungeon.rooms[room].roster = [{enemy,n,level}]; main's wake() spawns roster if present, else its old defaults
+world.spawn(enemy, n, { near, room, level }) · light(room, color, power) · mood(as) · sfx(cue, room) · music(track)
+world.bless(what, amount, who, actorId) · curse(what, secs, who, actorId) · seal(room, open) · say(text, voice) · quest(q)
+world.update(dt)            // fades lights, mood transitions, curse timers
+world.snapshot() / restore(s)  // persistent effects only (room lights, mood, music, seals, roles, curses) — for late joiners, ≤ 4 KB
+world.applyPalette(name)    // at build time
 ```
-`hud` is `{ say(text, voice), quests(list), banner(text, secs), shake(k), flash(r,g,b,k) }`, provided by main.
-Audio: add cues `bell`, `whisper`, `quake` (synthesised, no new files) and `music(track)` moods layered over the existing music file (`calm` low-pass, `dread` low + drone, `battle` full, `boss` full + drums synth, `silence` fade out).
+`hud` = `{ say(text, voice), quests(list), banner(text, secs), shake(k), flash(r,g,b,k) }` from main.
+Audio (E): add `audio.cue(name, { vol })` covering every `SFX` name (existing sounds + synthesised `bell`, `whisper`, `quake`), and `audio.music(track)` setting a mood multiplier/filter that `setCombat` respects (it currently overwrites gain every frame).
 
 ### Session (C)
-
 ```js
 const s = await createSession({ max: 12 });   // Patch rooms if window.patch; ?room=local-ABC → BroadcastChannel shim (multi-tab dev); else solo
-s.mode            // 'patch' | 'local' | 'solo'
-s.me              // { id, name }
-s.players         // [{ id, name, host }]
-s.isHost, s.code
-s.on('msg' | 'join' | 'leave' | 'host' | 'shared', fn)
-s.send(type, payload, { to })   // ≤ 16 KB, rate-limited internally to ≤ 25 msg/s
-s.setShared(obj)  // host only, ≤ 16 KB
+s.mode ('patch'|'local'|'solo'), s.me {id,name}, s.players [{id,name,host}], s.isHost, s.code
+s.on('msg'|'join'|'leave'|'host'|'shared'|'close', fn)
+s.send(type, payload, { to })   // ≤ 16 KB; internal token bucket ≤ 25/s, drops lowest-priority state first
+s.setShared(obj)                // host only, ≤ 16 KB
 s.shared, s.now(), s.invite(), s.leave()
 ```
+Protocol (`protocol.js`, encode/decode + size guards):
+- client→host: `p` own state 12 Hz (x,z,y,yaw,pitch,anim,hp; quantised), `hit {eid,dmg,crit,kind}`, `ev {event}` (enter/action/shrine/treasure/low_hp/down for the DM).
+- host→all: `h` ONE bundled tick 10 Hz `{ t, p: [players incl. host], e: [enemies: id,type,x,z,yaw,hp,anim], b: [bots] }` — must fit 16 KB at 12 players + 30 enemies + 11 bots (quantise to ints); `prog {seq, kind, cmds, actor}`; `dmg {to, dmg, kind}`; `fx {...}` one-shots.
+- shared (host `setShared`): `{ seed, floor, floorCmd, populate /*validated cmds*/, world: world.snapshot(), quests: quests.toJSON(), seq }`. Late joiner: build floor from seed+floorCmd, apply populate effect ops, restore world snapshot, load quests; no replay of one-shots.
+- Host migration: new host has the last `h` + shared; it takes over enemies from the last snapshot, starts a DM with `pickBackend()` and `dm.story` from shared.
 
-Protocol (`protocol.js`): `p` player state 15 Hz (x,z,y,yaw,pitch,anim,hp, quantised); `e` enemy snapshot host→all 10 Hz (id,type,x,z,yaw,hp,anim); `hit` client→host {eid,dmg,crit,kind}; `dmg` host→client; `prog` host→all {seq, cmds}; `fx` one-shot effects; `bot` companion states (same shape as `p`). Shared data: `{ seed, floor, name, theme, quests, log: [last 20 {seq,cmds}] }`.
+`avatars.js`: `createAvatars({ scene, assets, env })` → `{ upsert(id, state, {name, color, bot}), remove(id), update(dt), clear() }` — knight model, per-player tint, name tag sprite, interpolated ~100 ms behind.
 
-`avatars.js`: `createAvatars({ scene, assets, env })` → `{ upsert(id, state, {name, color, bot}), remove(id), update(dt) }` — knight model, per-player tint, name tag sprite, interpolated 100 ms behind.
-
-### Party (D)
-
-`createCompanions({ dungeon, enemies, fx, audio, floorY })` → `{ setCount(n, around), list, update(dt, humans), states() }`. Host-run. Each bot: follow nearest human (BFS on `dungeon.grid`), engage nearest enemy within 7 cells, sword in reach, fire bolt at range, retreat when low. Enemies target the nearest of all actors: `enemies.setTargets([{ id, x, z, alive }])` (multi-source distance field) and `enemies.onHitActor = (enemy, targetId, dmg, kind)`; existing single-player behaviour unchanged when one target.
+### Party + enemies (D)
+`createCompanions({ dungeon, enemies, fx, audio, floorY })` → `{ setCount(n, around), list, update(dt, humans), states() }`. Host-run, scripted: follow nearest human (BFS on grid), engage nearest enemy within 7 cells, sword in reach, fire bolt at range, back off when low, downed bots revive at room clear.
+`enemies.js`: `setTargets([{ id, x, z, alive }])` (multi-source distance field; each enemy chases/attacks the nearest target); `update(dt, hooks)` uses the targets (keep `update(dt, player, hooks)` working: a player arg means one target with id 'me'); `hooks.hitActor(enemy, targetId, dmg, kind)` when it hits a non-'me' target; client puppet mode `applySnapshot(list)` (create/move/animate/kill to match host, no AI); `snapshot()` → compact list for `h`; `damage` by id for host applying client `hit`s.
