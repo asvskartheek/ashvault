@@ -1,3 +1,5 @@
+import { shotsFor } from '../prompt.js';
+
 // Backend: Chrome's built-in Prompt API (Gemini Nano, `LanguageModel`). Never downloads the model during play: call download() from a menu.
 const LANG = { expectedInputs: [{ type: 'text', languages: ['en'] }], expectedOutputs: [{ type: 'text', languages: ['en'] }] };
 
@@ -14,7 +16,9 @@ export function createPromptApiBackend() {
 	const bases = new Map(); // kind -> Promise<session> holding only the static system prompt
 	const base = (kind, system) => {
 		if (!bases.has(kind)) {
-			const p = self.LanguageModel.create({ ...LANG, initialPrompts: [{ role: 'system', content: system }], temperature: 0.4, topK: 20 });
+			// Sampling options (temperature, topK) are extension-only on the web: passing them throws, so leave Chrome's defaults.
+			const shots = shotsFor(kind).flatMap(([u, a]) => [{ role: 'user', content: u }, { role: 'assistant', content: a }]);
+			const p = self.LanguageModel.create({ ...LANG, initialPrompts: [{ role: 'system', content: system }, ...shots] });
 			p.catch(() => bases.delete(kind));
 			bases.set(kind, p);
 		}

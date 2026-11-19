@@ -1549,6 +1549,7 @@ const proxy = {
 	generate: (r, o) => backend.generate(r, o),
 	warm: (...a) => backend.warm?.(...a),
 };
+const dmLog = [];
 function makeDM(story = '') {
 	dm?.stop();
 	backend = scripted;
@@ -1558,6 +1559,8 @@ function makeDM(story = '') {
 		quests,
 		story,
 		onProgram(cmds, meta) {
+			dmLog.push({ ...meta, cmds });
+			if (dmLog.length > 20) dmLog.shift();
 			if (meta.kind !== 'react' || !world) return;
 			seqN++;
 			runProgram(cmds, world, { actor: meta.actor });
@@ -2059,6 +2062,8 @@ $('bQuick').onclick = () => beginRun('quick');
 			get avatars() { return avatars; },
 			get world() { return world; },
 			get dm() { return dm; },
+			dmLog,
+			get backend() { return backend?.name; },
 			get companions() { return companions; },
 			quests,
 			remote,

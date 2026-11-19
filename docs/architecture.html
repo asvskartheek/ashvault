@@ -141,9 +141,9 @@ td:first-child { width:28px; }
 
 <h2>Measured</h2>
 <div class="grid">
-<div class="card"><b>1.1 s</b><span>LFM reaction · WebGPU</span></div>
+<div class="card"><b>1.1–1.3 s</b><span>LFM reaction in the live game · WebGPU</span></div>
 <div class="card"><b>21 s</b><span>LFM warm-up · first load</span></div>
-<div class="card"><b>1 ms</b><span>worst main-thread gap while generating</span></div>
+<div class="card"><b>0.2–0.5 ms</b><span>CPU per frame, idle vs generating · GPU contention not yet measured</span></div>
 <div class="card"><b>2.5 KB</b><span>host tick at 12 players + 30 enemies + 11 bots · cap 16 KB</span></div>
 <div class="card"><b class="ok">10 / 10</b><span>LFM reactions valid with grammar-constrained decoding · was 0 free-form</span></div>
 </div>
@@ -156,7 +156,9 @@ td:first-child { width:28px; }
 <tr><td class="ok">✓</td><td>Patch test checks incl. dm-genesis, dm-react</td></tr>
 <tr><td class="ok">✓</td><td>LFM grammar-constrained decoding · always valid world code</td></tr>
 <tr><td class="warn">◐</td><td>LFM content quality · 350M picks odd fields sometimes</td></tr>
-<tr><td class="todo">○</td><td>Real Patch rooms · Chrome Prompt API on a ready machine</td></tr>
+<tr><td class="todo">○</td><td>Real Patch rooms · 12 players (tested: 2 tabs)</td></tr>
+<tr><td class="todo">○</td><td>Chrome Prompt API path · never ran (model not ready here)</td></tr>
+<tr><td class="todo">○</td><td>Other players' fireballs and sword effects not drawn</td></tr>
 <tr><td class="todo">○</td><td>Release size: 255 MB model + 27 MB wasm vs Patch limit</td></tr>
 </table>
 </main>
